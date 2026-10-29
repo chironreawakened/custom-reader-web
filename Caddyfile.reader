@@ -1,7 +1,7 @@
-# Personal Reader site. The hostname comes from RDR_HOSTNAME in the .env.
+# Personal Reader site. Hostname: peisetti.duckdns.org (owner-chosen 2026-10-29).
 # This block is appended to the Mattermost Caddy config (one reverse proxy
-# for both, auto Let's Encrypt). Placeholder hostname until the owner picks one.
-reader.example.duckdns.org {
+# for both, auto Let's Encrypt via HTTP-01).
+peisetti.duckdns.org {
     encode gzip
 
     # API
