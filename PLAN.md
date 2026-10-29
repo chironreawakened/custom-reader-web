@@ -15,22 +15,26 @@ Built by an autonomous agent (Hermes) on the VPS, one tracer-bullet slice at a t
   - `packages/shared`: zod schemas (source of the OpenAPI spec), API types, reader model, canonical text + anchoring. Reused by the RN app.
 - **Versions**: Node 24 LTS, Postgres 17, pnpm 10, Caddy 2 (current stable). Exact versions are pinned in `package.json` `engines`/`packageManager`, Dockerfiles and the lockfile at slice 0.
 - **Postgres**: metadata, highlights, FTS, sessions, jobs.
-- **Hippius** (S3-compatible): all content, **always encrypted before upload** (SPECS §2). The storage layer is kept thin so a fallback can be added later; none is built now. Separate buckets for dev and prod.
+- **Hippius** (S3-compatible): all content, **always encrypted before upload** (SPECS §2). The storage layer is kept thin so a fallback can be added later; none is built now. One bucket.
 - **HTTPS**: Caddy with a Let's Encrypt cert for a **DuckDNS hostname** (HTTP-01, ports 80/443). Caddy also serves the built web app as static files, so there is no separate web container.
 
-## Environments on one VPS (4 GB RAM, Ubuntu)
+## Environment (single prod, owner decision 2026-10-29)
 
-| | Prod | Dev (agent) |
-|---|---|---|
-| Linux user | owner | `hermes` (unprivileged, **not** in `docker` group, no sudo) |
-| Location | `/srv/reader` | `/home/hermes/reader` |
-| Runs | Docker Compose project `reader-prod`: caddy (+web), api, worker, postgres | Rootless Docker (Postgres only), API/worker/web via `pnpm dev` on 127.0.0.1 |
-| Secrets | `/srv/reader/.env`, mode 600, owner-only | `/home/hermes/reader/.env`: dev master key, dev Hippius bucket, console mailer |
-| Storage | Hippius prod bucket | Hippius dev bucket |
+There is **no dev/prod split** on this VPS. One environment, running in
+`/srv/reader`, owned by the owner (`ubuntu` user, who has sudo and Docker).
+Hermes (same `ubuntu` user, with sudo) builds, runs and deploys.
 
-- The agent never reads prod secrets, touches prod containers or deploys. Docker group membership would be root-equivalent and expose prod, hence rootless Docker for the agent.
-- If Hippius access keys can't be scoped to one bucket, the agent's key could reach prod data. The data would still be ciphertext, since the agent has no prod master key, but it could be deleted. In that case use a separate Hippius account for prod.
-- **Memory budget**: prod ≈ 1–1.3 GB (Postgres tuned to ~256 MB shared_buffers, api + worker ~400 MB, Caddy ~50 MB). Dev ≈ 1–1.5 GB. Hermes itself is assumed to use a remote model API. Add a **4 GB swap file**. No image builds and no Playwright on the VPS.
+- **Location**: `/srv/reader` — code checkout, `Dockerfile`s, Compose file,
+  `deploy.sh`, Caddyfile.
+- **Secrets**: `/home/ubuntu/reader/.env`, mode 600, outside the repo
+  (never committed). Contains: `APP_MASTER_KEY` (the only key for all
+  content — backed up by the owner), Hippius access/secret key for the
+  **prod** bucket, Gmail app password, `ALLOWED_EMAIL`, `RDR_HOSTNAME`.
+- **Storage**: one Hippius bucket (`custom-reader`).
+- **Memory budget**: ≈ 1–1.3 GB (Postgres ~256 MB shared_buffers,
+  api + worker ~400 MB, Caddy ~50 MB). Hermes assumed to use a remote
+  model API. Add a **4 GB swap file**. No image builds on the VPS
+  (GHCR only) and no Playwright on the VPS.
 
 ## CI / CD
 - **GitHub Actions** (on every push to `main`):
@@ -38,12 +42,12 @@ Built by an autonomous agent (Hermes) on the VPS, one tracer-bullet slice at a t
   - Playwright e2e against the Compose stack, with MinIO standing in for Hippius and the console mailer
   - dependency audit
 - On green, Actions builds the `api` (also used for the worker) and `caddy` (with the web build baked in) images and pushes them to **GHCR**, tagged with the commit SHA.
-- **Deploy** (owner only): `sudo /srv/reader/deploy.sh <sha-or-tag>` runs `compose pull`, then the migrations as a one-off container, then `up -d`, then a health check. On a failed health check it rolls back to the previous tag. The agent writes this script and the owner runs it.
+- **Deploy**: `sudo /srv/reader/deploy.sh <sha-or-tag>` runs `compose pull`, then the migrations as a one-off container, then `up -d`, then a health check. On a failed health check it rolls back to the previous tag. Hermes may run it (it has sudo); the owner runs it if they prefer.
 - No secrets in GitHub Actions except the built-in `GITHUB_TOKEN`.
 
 ## Users and auth
 Single user; every table still has `user_id`. Signup is closed: only `ALLOWED_EMAIL`.
-- Login is an **emailed 6-digit code**, with no passwords or links. It's sent via Gmail SMTP with an app password, to the owner's own address, behind a `Mailer` interface. A console mailer is used in dev and CI.
+- Login is an **emailed 6-digit code**, with no passwords or links. It's sent via Gmail SMTP with an app password, to the owner's own address, behind a `Mailer` interface. A console mailer is used in CI.
 - Attempt caps, rate limits, sessions, CSRF: SPECS §4.
 - **Break-glass**: `docker compose exec api node dist/cli.js login-code` prints a valid code.
 - Web uses an HttpOnly cookie; RN uses a bearer token. Both work from slice 1.
@@ -92,8 +96,8 @@ Every source normalizes to Document → ordered Sections (sanitized HTML stored 
 Each slice is a thin, end-to-end path through every layer and ends with a **"you can verify"** check. Every slice ends the same way:
 1. CI is green.
 2. The agent writes `docs/slices/slice-N.md` (what was built, how to verify, known gaps) and tags the commit `slice-N`.
-3. The agent **stops**.
-4. The owner deploys and verifies, then tells the agent to continue.
+3. The agent deploys via `deploy.sh` and verifies on the live site.
+4. The owner verifies, then tells the agent to continue.
 
 ### Slice 0: Walking skeleton
 - Monorepo, Drizzle and the first migration (`users`, `storage_objects`).
@@ -167,16 +171,15 @@ Backup restore drill, a review of CSP and headers, the OpenAPI spec generated fr
 - **Owner code review before tagging** is required for slice 0 (encryption) and slice 4 (canonical text and anchoring).
 
 ## Owner setup (before slice 0)
-1. Hippius: create **two** buckets (dev, prod) with keys scoped per bucket if possible.
-2. Generate a **dev** `APP_MASTER_KEY` for the agent, and later a separate **prod** one (`openssl rand -base64 32`). Save the prod key in a password manager. **Losing the prod key means losing all content.**
+1. Hippius: one bucket (created: `custom-reader`) with the access key in the `.env`.
+2. `APP_MASTER_KEY` (generated 2026-10-29 on the VPS, in the `.env`). **Back it up in a password manager and offline — losing it means losing all content.**
 3. Create an empty GitHub repo. Give Hermes a fine-grained token for that repo only (contents read/write). Add a ruleset on `main` that **blocks force pushes and branch deletion**.
 4. On the VPS:
-   - Create the `hermes` user (no sudo) and set up rootless Docker for it.
    - Add 4 GB of swap.
    - Allow only ports 22, 80 and 443 in ufw.
-   - Install Docker for the owner.
-5. DuckDNS: pick a name and point it at the VPS IP.
-6. Before slice 1: turn on Google 2-step verification and create a Gmail app password (prod `.env` only).
+   - Install Docker.
+5. DuckDNS: pick a name and point it at the VPS IP (**54.37.233.34**, static — set once).
+6. Before slice 1: turn on Google 2-step verification and create a Gmail app password for the `.env`.
 
 `docs/owner-setup.md` (written in slice 0) turns the VPS part into exact commands.
 
