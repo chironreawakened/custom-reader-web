@@ -1,0 +1,18 @@
+# Personal Reader site. The hostname comes from RDR_HOSTNAME in the .env.
+# This block is appended to the Mattermost Caddy config (one reverse proxy
+# for both, auto Let's Encrypt). Placeholder hostname until the owner picks one.
+reader.example.duckdns.org {
+    encode gzip
+
+    # API
+    handle /v1/* {
+        reverse_proxy 127.0.0.1:3100
+    }
+
+    # static web build (baked into the caddy image in CI, or served from host path)
+    handle {
+        root * /srv/reader/web-dist
+        try_files {path} /index.html
+        file_server
+    }
+}

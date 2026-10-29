@@ -1,0 +1,41 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: reader
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_DB: reader
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reader"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # internal only; not exposed to the host
+  api:
+    image: ghcr.io/chironreawakened/custom-reader-api:${TAG:-latest}
+    restart: unless-stopped
+    env_file: /home/ubuntu/reader/.env
+    environment:
+      PORT: 3100
+      POSTGRES_URL: postgres://reader:${POSTGRES_PASSWORD}@postgres:5432/reader
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      # loopback only: the host Caddy (Mattermost's) reverse-proxies this
+      - "127.0.0.1:3100:3100"
+  worker:
+    image: ghcr.io/chironreawakened/custom-reader-api:${TAG:-latest}
+    restart: unless-stopped
+    command: ["node", "dist/worker.js"]
+    env_file: /home/ubuntu/reader/.env
+    environment:
+      POSTGRES_URL: postgres://reader:${POSTGRES_PASSWORD}@postgres:5432/reader
+    depends_on:
+      postgres:
+        condition: service_healthy
+volumes:
+  pgdata:
