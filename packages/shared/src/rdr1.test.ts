@@ -159,7 +159,7 @@ describe("RDR1 tamper / truncation / reordering (SPECS §2)", () => {
 
   it("rejects a flipped bit in the header (magic)", () => {
     const c = Buffer.from(enc.ciphertext);
-    c[0] ^= 0x01; // "R" -> "A"
+    c.writeUInt8(c.readUInt8(0) ^ 0x01, 0); // "R" -> "A"
     expect(() => rdr.decrypt(meta, c)).toThrow(Rdr1Error);
   });
 
@@ -181,7 +181,7 @@ describe("RDR1 tamper / truncation / reordering (SPECS §2)", () => {
     for (const seg of [0, 1, 2, 3]) {
       const off = 16 + seg * (S + 16) + 10;
       const c2 = Buffer.from(enc.ciphertext);
-      c2[off] ^= 0x80;
+      c2.writeUInt8(c2.readUInt8(off) ^ 0x80, off);
       expect(() => rdr.decrypt(meta, c2)).toThrow(Rdr1Error);
     }
   });
@@ -190,7 +190,7 @@ describe("RDR1 tamper / truncation / reordering (SPECS §2)", () => {
     for (const seg of [0, 1, 2, 3]) {
       const tagOff = 16 + seg * (S + 16) + (seg === 3 ? 123 : S) + 16 - 1;
       const c2 = Buffer.from(enc.ciphertext);
-      c2[tagOff] ^= 0x01;
+      c2.writeUInt8(c2.readUInt8(tagOff) ^ 0x01, tagOff);
       expect(() => rdr.decrypt(meta, c2)).toThrow(Rdr1Error);
     }
   });
@@ -309,7 +309,8 @@ describe("RDR1 range reads (SPECS §2)", () => {
     const enc2 = r2.encrypt(pt2, "obj-range3");
     const meta2 = metaFor(r2, "obj-range3", size, enc2);
     const ct = Buffer.from(enc2.ciphertext);
-    ct[16 + 2 * (S + 16) + 5] ^= 0xff; // flip in segment 2
+    const flipOff = 16 + 2 * (S + 16) + 5; // flip in segment 2
+    ct.writeUInt8(ct.readUInt8(flipOff) ^ 0xff, flipOff);
     const fetch2 = memStore(ct);
     await expect(r2.fetchPlaintextRange(meta2, 2 * S, 2 * S + 100, fetch2)).rejects.toThrow();
   });
