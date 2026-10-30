@@ -25,8 +25,11 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      # loopback only: the host Caddy (Mattermost's) reverse-proxies this
-      - "127.0.0.1:3100:3100"
+      # Exposed on the host's mattermost-bridge gateway IP only: the
+      # Mattermost Caddy container (on that bridge) reverse-proxies the
+      # site; 127.0.0.1 would not be reachable from inside Caddy's netns.
+      # UFW allows 172.18.0.0/16 -> 3100 and nothing else.
+      - "172.18.0.1:3100:3100"
   worker:
     image: ghcr.io/chironreawakened/custom-reader-api:${TAG:-latest}
     restart: unless-stopped
