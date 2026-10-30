@@ -3,14 +3,21 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "scripts": { "build": "vite build", "dev": "vite" },
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit"
+  },
   "dependencies": {
+    "@reader/shared": "workspace:*",
     "@tanstack/react-query": "^5.60.0",
     "@tanstack/react-router": "^1.92.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@types/node": "^24.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",

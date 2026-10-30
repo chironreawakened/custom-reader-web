@@ -4,6 +4,7 @@ RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY packages/shared ./packages/shared
 COPY apps/web ./apps/web
+COPY e2e ./e2e
 RUN pnpm install --frozen-lockfile
 RUN pnpm --filter @reader/web build
 
