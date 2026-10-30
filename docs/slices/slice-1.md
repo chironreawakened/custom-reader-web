@@ -113,11 +113,10 @@ bug fixed in logout). Commented in code.
 - e2e Playwright runs in CI only; it could not be executed on the VPS
   (MinIO image pull is blocked there), so CI is the first place the
   browser flow runs.
-- MinIO tag pinned in CI e2e: `RELEASE.2024-09-13T20-14-38Z` — a real,
-  existing release, but its existence could only be confirmed from
-  MinIO's release docs (Docker Hub API is unreachable from the VPS).
-  If the e2e job fails to pull it, bump the tag in
-  `e2e/docker-compose.e2e.yml`.
+- MinIO tag pinned in CI e2e: `RELEASE.2024-09-13T20-26-02Z` — verified
+  against the minio/minio GitHub releases list. Docker Hub is
+  unreachable from the VPS, so tag pinning must be done from the
+  GitHub release list or docs, not `docker pull` on the VPS.
 - In-memory rate limits reset on API restart (acceptable for a
   single-user, single-container app).
 - Session `user_agent` is stored but no per-device view yet (later
