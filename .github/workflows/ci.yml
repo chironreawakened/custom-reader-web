@@ -20,8 +20,8 @@ jobs:
       - run: pnpm -r test
 
   # E2E (Playwright) — CI only, never on the VPS (4 GB RAM).
-  # Stack: postgres (real schema via the app's migrations) + MinIO (S3
-  # stand-in for Hippius) + the locally built API with MAILER=console.
+  # Stack: postgres (real schema via the app's migrations) + adobe/s3mock
+  # (S3 stand-in for Hippius) + the locally built API with MAILER=console.
   # The console mailer appends login codes to a mailbox file the test reads.
   e2e:
     runs-on: ubuntu-latest
@@ -36,16 +36,16 @@ jobs:
       - run: pnpm --filter @reader/web build
       - run: pnpm --filter @reader/e2e exec playwright install --with-deps chromium
 
-      - name: Bring up postgres + minio
+      - name: Bring up postgres + s3mock
         run: docker compose -f e2e/docker-compose.e2e.yml up -d --wait
 
-      - name: Wait for MinIO
+      - name: Wait for S3
         run: |
           for i in $(seq 1 30); do
-            curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null && exit 0
+            curl -fsS http://127.0.0.1:9000 >/dev/null && exit 0
             sleep 1
           done
-          echo "minio did not become ready" >&2; exit 1
+          echo "s3mock did not become ready" >&2; exit 1
 
       - name: Run migrations
         run: cd apps/api && node dist/db/migrate.js
@@ -59,7 +59,7 @@ jobs:
             HIPPUS_ENDPOINT=http://127.0.0.1:9000 \
             HIPPUS_REGION=us-east-1 \
             HIPPUS_BUCKET=reader-e2e \
-            HIPPUS_ACCESS_KEY=minio \
+            HIPPUS_ACCESS_KEY=minioadmin \
             HIPPUS_SECRET_KEY=*** \
             POSTGRES_URL=postgres://reader:***@127.0.0.1:5432/reader \
             ALLOWED_EMAIL=e2e@reader.test \

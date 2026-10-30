@@ -56,13 +56,12 @@ built.
   in `apps/web/src/api.ts`.
 - **e2e** (`e2e/`): Playwright specs (full login loop + wrong-code
   rejection) against the real SPA; `docker-compose.e2e.yml`
-  (postgres + MinIO); new CI `e2e` job (CI only — never on the VPS);
-  CI now also builds + pushes the `custom-reader-web` image;
-  `deploy.sh` extracts the static web build into
-  `/srv/reader/web-dist` for Caddy.
-- **S3 client**: `ensureBucket()` (HeadBucket/CreateBucket) so the CI
-  e2e's fresh MinIO works; no-op in prod where the Hippius bucket
-  exists.
+  (postgres + adobe/s3mock as the S3 stand-in); new CI `e2e` job (CI
+  only — never on the VPS); CI now also builds + pushes the
+  `custom-reader-web` image; `deploy.sh` extracts the static web build
+  into `/srv/reader/web-dist` for Caddy.
+- **S3 client**: `ensureBucket()` (HeadBucket/CreateBucket) so a fresh
+  S3 stand-in works; no-op in prod where the Hippius bucket exists.
 
 **New dependencies:** `@fastify/cookie` (api), `@playwright/test`
 (e2e dev-only), nodemailer already present from slice 0.
@@ -113,10 +112,12 @@ bug fixed in logout). Commented in code.
 - e2e Playwright runs in CI only; it could not be executed on the VPS
   (MinIO image pull is blocked there), so CI is the first place the
   browser flow runs.
-- MinIO tag pinned in CI e2e: `RELEASE.2024-09-13T20-26-02Z` — verified
-  against the minio/minio GitHub releases list. Docker Hub is
-  unreachable from the VPS, so tag pinning must be done from the
-  GitHub release list or docs, not `docker pull` on the VPS.
+- S3 stand-in for e2e is `adobe/s3mock` (same image as the VPS
+  local-verify stack): MinIO's older Docker Hub tags get pruned — the
+  first CI run pulled a tag that already 404'd, and even real release
+  tags from 2024-09 stopped resolving by the second run. s3mock is
+  stable, accepts any credentials, and passed the full login loop
+  locally before being reused in CI.
 - In-memory rate limits reset on API restart (acceptable for a
   single-user, single-container app).
 - Session `user_agent` is stored but no per-device view yet (later
