@@ -12,8 +12,10 @@ RUN pnpm --filter @reader/api build
 FROM node:24-alpine
 WORKDIR /app
 ENV NODE_ENV=production
-RUN corepack enable
-COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/apps/api/dist ./dist
+# esbuild marks runtime deps as external, so they must resolve from
+# apps/api's node_modules (pnpm workspace layout). Copy the whole build
+# tree to keep the symlink structure intact.
+COPY --from=build /app ./
 USER node
+WORKDIR /app/apps/api
 CMD ["node", "dist/server.js"]
