@@ -1,18 +1,28 @@
 # Personal Reader site. Hostname: peisetti.duckdns.org (owner-chosen 2026-10-29).
-# This block is appended to the Mattermost Caddy config (one reverse proxy
-# for both, auto Let's Encrypt via HTTP-01).
+# Appended to the Mattermost Caddy config at /opt/mattermost/Caddyfile (bind-mount).
+#
+# IMPORTANT networking notes (verified 2026-10-29):
+# - The Caddy container lives on the `mattermost_default` bridge; from inside it,
+#   127.0.0.1 is the container itself. The reader API (on the host) is reached
+#   via the host's bridge-gateway IP: 172.18.0.1.
+# - UFW on this host is default-deny for FORWARD, so the bridge must be allowed
+#   to reach the API port:
+#     sudo ufw allow from 172.18.0.0/16 to any port 3100 proto tcp
+# - The reader API listens on 0.0.0.0:3100 inside the api container with the
+#   compose port bound to 127.0.0.1:3100; the UFW rule above exposes 3100 to
+#   the Docker bridge only (not the internet).
 peisetti.duckdns.org {
-    encode gzip
+	encode gzip
 
-    # API
-    handle /v1/* {
-        reverse_proxy 127.0.0.1:3100
-    }
+	# API
+	handle /v1/* {
+		reverse_proxy 172.18.0.1:3100
+	}
 
-    # static web build (baked into the caddy image in CI, or served from host path)
-    handle {
-        root * /srv/reader/web-dist
-        try_files {path} /index.html
-        file_server
-    }
+	# static web build (deployed to /srv/reader/web-dist by deploy.sh)
+	handle {
+		root * /srv/reader/web-dist
+		try_files {path} /index.html
+		file_server
+	}
 }

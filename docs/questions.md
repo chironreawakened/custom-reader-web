@@ -6,14 +6,22 @@
 split).** Prod `.env` at `/home/ubuntu/reader/.env` (mode 600, outside the
 repo). Owner filled in Hippius creds for bucket `custom-reader`.
 Credentials verified working against Hippius (list_buckets/head_bucket OK).
-Open items:
 
-- Hippius account has **no credit** — PutObject fails with
-  `InsufficientAccountCredit`. Owner must top up the account before the
-  storage round-trip can be verified.
-- DuckDNS hostname still not chosen (needed in the Caddyfile and
-  `docs/owner-setup.md`; owner will pick a name later — see Q1b).
-- `ALLOWED_EMAIL` and Gmail app password still placeholders in the `.env`.
+**RESOLVED 2026-10-29 (later): all three open items closed.**
+
+- Hippius account funded by owner; verified with a real round-trip:
+  PUT → full GET → ranged GET (2 exact ranges) → DELETE, all OK
+  (`HIPPUS_STORAGE: ALL_OK`). App health check reports
+  `storage: "ok (encrypted)"`.
+- DuckDNS hostname: `peisetti.duckdns.org` (owner-claimed 2026-10-29,
+  pointed at 54.37.233.34 from the DuckDNS settings UI; A record verified
+  with dig). Wired into the Mattermost Caddy at `/opt/mattermost/Caddyfile`
+  with auto Let's Encrypt (HTTP-01) — cert issued, and
+  `https://peisetti.duckdns.org/v1/health` returns 200 from the public
+  internet. See Q1b.
+- SMTP (`SMTP_HOST/PORT/USER/PASS`) now set in the `.env` from the
+  existing `/etc/mail-gmail/mail.env` (owner: "use your own gmail account
+  for emailing"); a real test message was sent successfully 2026-10-29.
 
 PLAN.md lists these as owner setup *before slice 0*, but none exist on the VPS yet:
 
@@ -36,11 +44,33 @@ Asked the owner directly (Mattermost) for:
 3. Confirmation to use a locally generated dev `APP_MASTER_KEY` (32 random
    bytes, base64) that I generate on the VPS for dev only.
 
-## Q1b (2026-10-29): DuckDNS hostname
+## Q1b (2026-10-29): DuckDNS hostname — RESOLVED
 
-Awaiting the owner's name choice (any free subdomain of `duckdns.org`,
-pointed at VPS IP 54.37.233.34). Until then the Caddyfile uses the
-placeholder `RDR_HOSTNAME` from the `.env`.
+`peisetti.duckdns.org`, claimed by the owner on the DuckDNS site (GitHub
+login; account page is reCAPTCHA-gated for this VPS's datacenter browser).
+Owner pointed it at 54.37.233.34 from the DuckDNS settings; A record
+verified 2026-10-29 with `dig` (54.37.233.34).
+
+Wired in 2026-10-29:
+
+- `/home/ubuntu/reader/.env`: `RDR_HOSTNAME=peisetti.duckdns.org`.
+- Site block appended to `/opt/mattermost/Caddyfile` (backup:
+  `/opt/mattermost/Caddyfile.bak-20261029`), mirrored in the repo as
+  `Caddyfile.reader`. Let's Encrypt cert auto-issued (HTTP-01) and valid.
+- **Networking gotchas found + fixed** (both now in `Caddyfile.reader`):
+  1. Caddy runs in Docker on the `mattermost_default` bridge, so the API on
+     the host is reached as `172.18.0.1:3100` (host gateway IP), **not**
+     `127.0.0.1:3100`.
+  2. UFW default-deny dropped container→host traffic; added
+     `sudo ufw allow from 172.18.0.0/16 to any port 3100 proto tcp`.
+- Verified end-to-end: `curl https://peisetti.duckdns.org/v1/health` from
+  the public internet → HTTP 200 with
+  `{"api":"ok","db":"ok","storage":"ok (encrypted)"}` (temporary test API +
+  test Postgres since the real stack is not deployed via compose yet).
+
+Note for the future: DuckDNS account token still unknown to us — with the
+static IP that's fine (no updater needed). If the VPS IP ever changes,
+ask the owner for the token from the DuckDNS account page.
 
 ## Q4 (2026-10-29, resolved same day): Single prod environment
 
