@@ -12,6 +12,12 @@ const schema = z.object({
   ALLOWED_EMAIL: z.string().min(1),
   RDR_HOSTNAME: z.string().min(3),
   RDR_ENV: z.enum(["prod", "ci"]).optional(),
+  // Mailer (SPECS §4): "smtp" in prod, "console" in CI/e2e.
+  MAILER: z.enum(["smtp", "console"]).default("smtp"),
+  SMTP_HOST: z.string().optional(),
+  SMTP_PORT: z.coerce.number().int().optional(),
+  SMTP_USER: z.string().optional(),
+  SMTP_PASS: z.string().optional(),
 });
 
 export interface AppConfig {
@@ -27,11 +33,26 @@ export interface AppConfig {
   allowedEmail: string;
   publicOrigin: string;
   env: "prod" | "ci";
+  mailer: "smtp" | "console";
+  smtp?: {
+    host: string;
+    port: number;
+    user: string;
+    pass: string;
+  };
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const e = schema.parse(env);
   const masterKey = validateMasterKey(e.APP_MASTER_KEY);
+
+  // SMTP creds are only required when the smtp mailer is selected.
+  if (e.MAILER === "smtp") {
+    if (!e.SMTP_HOST || e.SMTP_PORT === undefined || !e.SMTP_USER || !e.SMTP_PASS) {
+      throw new Error("MAILER=smtp requires SMTP_HOST, SMTP_PORT, SMTP_USER and SMTP_PASS");
+    }
+  }
+
   return {
     masterKey,
     hippus: {
@@ -45,5 +66,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     allowedEmail: e.ALLOWED_EMAIL.toLowerCase(),
     publicOrigin: e.RDR_HOSTNAME,
     env: e.RDR_ENV ?? "prod",
+    mailer: e.MAILER,
+    ...(e.MAILER === "smtp" && {
+      smtp: {
+        host: e.SMTP_HOST!,
+        port: e.SMTP_PORT!,
+        user: e.SMTP_USER!,
+        pass: e.SMTP_PASS!,
+      },
+    }),
   };
 }
