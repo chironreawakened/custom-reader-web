@@ -3,8 +3,10 @@
  * Deliberately minimal: put/get/ranged-get/delete/head.
  */
 import {
+  CreateBucketCommand,
   DeleteObjectCommand,
   GetObjectCommand,
+  HeadBucketCommand,
   HeadObjectCommand,
   PutObjectCommand,
   S3Client,
@@ -12,6 +14,8 @@ import {
 import type { AppConfig } from "../config.js";
 
 export interface S3Storage {
+  /** Create the bucket if it does not exist (no-op when it does). */
+  ensureBucket(): Promise<void>;
   put(key: string, body: Uint8Array | ReadableStream, mime?: string): Promise<void>;
   /** Full object body. */
   get(key: string): Promise<Uint8Array>;
@@ -33,6 +37,13 @@ export function createS3Storage(cfg: AppConfig): S3Storage {
   });
 
   return {
+    async ensureBucket() {
+      try {
+        await client.send(new HeadBucketCommand({ Bucket: cfg.hippus.bucket }));
+      } catch {
+        await client.send(new CreateBucketCommand({ Bucket: cfg.hippus.bucket }));
+      }
+    },
     async put(key, body, mime = "application/octet-stream") {
       await client.send(
         new PutObjectCommand({
