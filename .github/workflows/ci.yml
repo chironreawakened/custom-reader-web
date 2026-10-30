@@ -19,7 +19,9 @@ jobs:
       - run: pnpm -r typecheck
       - run: pnpm -r test
 
-  # E2E (Playwright) runs in CI only; MinIO stands in for Hippius.
+  # E2E (Playwright) runs in CI only. Real tests land per slice; until then
+  # this job is a placeholder (no S3 stand-in pulled — added when the first
+  # e2e test needs one).
   e2e:
     runs-on: ubuntu-latest
     needs: test
@@ -29,12 +31,6 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 24, cache: pnpm }
       - run: pnpm install --frozen-lockfile
-      - name: MinIO stand-in for Hippius
-        run: |
-          docker run -d --name minio -p 9000:9000 -p 9001:9001 \
-            -e MINIO_ROOT_USER=minio -e MINIO_ROOT_PASSWORD=minio minio/minio server /data
-          docker exec minio mc alias set local http://localhost:9000 minio minio
-          docker exec minio mc mb -p local/reader-ci || true
       - run: pnpm -r test:e2e || echo "(e2e wired in slice 0, real tests land per slice)"
 
   # Build + push images to GHCR on green.
