@@ -127,3 +127,18 @@ bug fixed in logout). Commented in code.
 - None beyond those already approved in slice 0. The handoff's
   "upload/download in slice 1" wording was resolved in favour of
   PLAN.md (slice 1 = Login); flagged here per AGENTS.md.
+
+## Post-deploy infrastructure fix (2026-10-30, prod)
+- Caddy static 404s after first deploy: the Mattermost Caddy container
+  had no bind mount for `/srv/reader/web-dist`, so the `file_server`
+  root didn't exist inside the container (slice 0 only ever checked
+  `/v1/health`, which goes through the reverse proxy). Fixed by adding
+  `/srv/reader/web-dist:/srv/reader/web-dist:ro` to the caddy service
+  in `/opt/mattermost/docker-compose.yml` (backup
+  `docker-compose.yml.bak-20261030`) and recreating caddy.
+- `deploy.sh` hardened against the same class of failure: web-dist
+  contents are now swapped **in place** (never `rm -rf` + `mv` the dir —
+  that would orphan Caddy's bind mount to a deleted inode), and the
+  health check additionally asserts the extraction produced
+  `index.html` + `assets/`, plus a final public check of `/` and
+  `/v1/health` through Caddy.

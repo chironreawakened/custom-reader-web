@@ -25,16 +25,30 @@ echo ">> updating static web build"
 docker pull "ghcr.io/chironreawakened/custom-reader-web:${TAG}"
 docker rm -f reader-web-extract 2>/dev/null || true
 docker create --name reader-web-extract "ghcr.io/chironreawakened/custom-reader-web:${TAG}" true
-docker cp reader-web-extract:/srv/reader/web-dist /srv/reader/.web-dist.new
-rm -rf /srv/reader/web-dist
-mv /srv/reader/.web-dist.new /srv/reader/web-dist
-chmod 755 /srv/reader/web-dist
+# Replace contents IN PLACE. Never `rm -rf` + `mv` the dir itself: Caddy has
+# a bind mount on /srv/reader/web-dist, and swapping the directory inode
+# leaves the mount pointing at a deleted inode (static 404s) until Caddy is
+# recreated. In-place content swap keeps the inode stable.
+mkdir -p /srv/reader/web-dist
+find /srv/reader/web-dist -mindepth 1 -delete
+docker cp reader-web-extract:/srv/reader/web-dist/. /srv/reader/web-dist/
+chmod -R a+rX /srv/reader/web-dist
 docker rm -f reader-web-extract
 
 echo ">> health check"
+test -s /srv/reader/web-dist/index.html && test -n "$(ls -A /srv/reader/web-dist/assets 2>/dev/null)" \
+  || { echo ">> web-dist is incomplete — deploy failed before health check" >&2; exit 1; }
 for i in $(seq 1 30); do
   if curl -fsS http://172.18.0.1:3100/v1/health >/dev/null 2>&1; then
-    echo "healthy"; exit 0
+    echo "healthy"; break
+  fi
+  sleep 2
+done
+# Final public check (Caddy -> API + static): both must answer 200.
+for i in $(seq 1 15); do
+  if curl -fsS -o /dev/null https://peisetti.duckdns.org/v1/health \
+     && curl -fsS -o /dev/null -w '' https://peisetti.duckdns.org/; then
+    echo "public OK (api + static)"; exit 0
   fi
   sleep 2
 done
