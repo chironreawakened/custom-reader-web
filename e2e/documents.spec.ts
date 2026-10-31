@@ -11,13 +11,24 @@ import { execFileSync } from "node:child_process";
 //
 // The fixture book is generated with apps/api/tools/make-fixture-epub.mjs so
 // CI doesn't ship a binary in the repo. REPO_ROOT must point at the repo.
+//
+// NOTE: all specs log in as the single ALLOWED_EMAIL and codes are
+// single-use, so the suite must run serially (workers: 1 in the config).
 
 const EMAIL = "e2e@reader.test";
 const FIXTURE = "/tmp/e2e-fixture.epub";
 
-function latestCode(mailbox: string): string | null {
+function mailboxLines(): string[] {
+  try {
+    return readFileSync(process.env.E2E_MAILBOX!, "utf8").split("\n");
+  } catch {
+    return [];
+  }
+}
+
+function latestCodeSince(mailbox: string, baseline: number): string | null {
   const lines = readFileSync(mailbox, "utf8").split("\n").filter(Boolean);
-  for (let i = lines.length - 1; i >= 0; i--) {
+  for (let i = lines.length - 1; i >= baseline; i--) {
     const m = /code is (\d{6})/i.exec(lines[i]!);
     if (m) return m[1]!;
   }
@@ -27,26 +38,27 @@ function latestCode(mailbox: string): string | null {
 async function login(page: Page): Promise<void> {
   const mailbox = process.env.E2E_MAILBOX;
   if (!mailbox) throw new Error("E2E_MAILBOX not set");
+  const baseline = mailboxLines().length;
 
   await page.goto("/");
   await page.getByTestId("email-input").fill(EMAIL);
   await page.getByTestId("request-btn").click();
   await page.getByTestId("code-first").waitFor();
-  await expect
+  const code = await expect
     .poll(() => {
       try {
-        return latestCode(mailbox);
+        return latestCodeSince(mailbox, baseline);
       } catch {
         return null;
       }
     }, { timeout: 15_000, message: "code never reached the console mailbox" })
-    .toMatch(/^\d{6}$/);
-  const code = latestCode(mailbox)!;
+    .toMatch(/^\d{6}$/)
+    .then(() => latestCodeSince(mailbox, baseline)!);
   const inputs = page.locator('input[inputmode="numeric"]');
   for (let i = 0; i < 6; i++) {
     await inputs.nth(i).fill(code[i]!);
   }
-  await expect(page.getByTestId("signed-in")).toBeVisible();
+  await expect(page.getByTestId("signed-in")).toBeVisible({ timeout: 10_000 });
 }
 
 test.describe.configure({ mode: "serial" });
