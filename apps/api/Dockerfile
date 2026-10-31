@@ -11,6 +11,8 @@ RUN pnpm install --frozen-lockfile
 RUN pnpm --filter @reader/api build
 
 FROM node:24-alpine
+# postgresql-client provides pg_dump for the nightly backup job (worker).
+RUN apk add --no-cache postgresql-client
 WORKDIR /app
 ENV NODE_ENV=production
 # esbuild marks runtime deps as external, so they must resolve from

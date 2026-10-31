@@ -1,12 +1,16 @@
 import Fastify from "fastify";
 import fastifyCookie from "@fastify/cookie";
+import fastifyMultipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import { existsSync } from "node:fs";
 import { loadConfig } from "./config.js";
 import { createS3Storage } from "./storage/s3.js";
+import { createObjectStore } from "./storage/object-store.js";
 import { makeHealthService } from "./services/health.js";
 import { closeDb } from "./db/client.js";
 import { registerAuth } from "./routes/auth.js";
+import { registerDocuments } from "./routes/documents.js";
+import { createBoss } from "./jobs/boss.js";
 import type { AppConfig } from "./config.js";
 import type { Mailer } from "./services/mailer.js";
 
@@ -20,6 +24,7 @@ export interface BuildServerOptions {
 export async function buildServer(cfg = loadConfig(), opts: BuildServerOptions = {}) {
   const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? "info" } });
   await app.register(fastifyCookie, {});
+  await app.register(fastifyMultipart, { limits: { fileSize: 200 * 1024 * 1024 } });
 
   const storage = createS3Storage(cfg);
   const health = makeHealthService(cfg, storage);
@@ -39,6 +44,16 @@ export async function buildServer(cfg = loadConfig(), opts: BuildServerOptions =
   if (opts.mailer) authCtx.mailer = opts.mailer;
   if (opts.now) authCtx.now = opts.now;
   await registerAuth(app, authCtx);
+
+  const objectStore = createObjectStore(cfg, storage);
+  const boss = createBoss(cfg);
+  // The API only SENDS jobs; starting the boss opens its db connection (and
+  // runs a schema check). The worker process starts its own boss + work() handlers.
+  await boss.start();
+  app.addHook("onClose", async () => {
+    await boss.stop().catch(() => {});
+  });
+  await registerDocuments(app, { config: cfg, objectStore, boss, now: opts.now });
 
   // CI e2e only: serve the built SPA so Playwright can drive the real UI at the
   // API origin (in prod Caddy serves /srv/reader/web-dist instead).

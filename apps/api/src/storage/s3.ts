@@ -16,7 +16,7 @@ import type { AppConfig } from "../config.js";
 export interface S3Storage {
   /** Create the bucket if it does not exist (no-op when it does). */
   ensureBucket(): Promise<void>;
-  put(key: string, body: Uint8Array | ReadableStream, mime?: string): Promise<void>;
+  put(key: string, body: Uint8Array, mime?: string): Promise<void>;
   /** Full object body. */
   get(key: string): Promise<Uint8Array>;
   /** Ranged GET: ciphertext bytes [offset, offset+length). */

@@ -13,6 +13,7 @@ import {
 import type { Mailer } from "../services/mailer.js";
 import { createMailer } from "../services/mailer.js";
 import { SlidingWindowLimiter } from "../services/rate-limit.js";
+import { csrfOk } from "../services/csrf.js";
 import {
   requestCode as otpRequest,
   verifyCode as otpVerify,
@@ -37,25 +38,6 @@ export interface AuthContext {
   mailer?: Mailer;
   /** Injected to make rate-limit/session windows deterministic in tests. */
   now?: () => number;
-}
-
-/** Full public origin for the Origin check. */
-function publicOrigin(config: AppConfig): string {
-  return config.env === "ci" ? `http://${config.publicOrigin}` : `https://${config.publicOrigin}`;
-}
-
-/**
- * CSRF guard for cookie-authenticated mutating requests (SPECS §4). Bearer
- * requests are exempt (no cookie in play). Requires X-Requested-With: reader
- * and an Origin matching the configured public origin.
- */
-function csrfOk(req: FastifyRequest, config: AppConfig): boolean {
-  if (req.headers["x-requested-with"] !== "reader") return false;
-  const origin = req.headers["origin"];
-  if (typeof origin !== "string") return false;
-  const expected = publicOrigin(config);
-  const o = origin.toLowerCase();
-  return o === expected.toLowerCase() || o === expected.toLowerCase() + "/";
 }
 
 export async function registerAuth(app: FastifyInstance, ctx: AuthContext) {

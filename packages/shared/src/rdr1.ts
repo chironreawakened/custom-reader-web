@@ -279,3 +279,32 @@ export class Rdr1 {
     return unwrapDek(Buffer.from(meta.wrappedDek), this.kek, meta.objectId);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Low-level helpers exported for the streaming encryptor (apps/api). These are
+// the same primitives `Rdr1.encrypt` uses, so the on-the-fly upload path and
+// the batch path produce byte-identical RDR1 objects.
+// ---------------------------------------------------------------------------
+
+/** 16-byte plaintext header: magic + version + segment_size + nonce_prefix. */
+export function buildRdr1Header(noncePrefix: Uint8Array): Buffer {
+  return buildHeader(noncePrefix);
+}
+
+/** 12-byte GCM nonce for segment `index` (last_flag set for the final one). */
+export function rdr1SegmentNonce(noncePrefix: Uint8Array, index: number, isLast: boolean): Buffer {
+  return segmentNonce(noncePrefix, index, isLast);
+}
+
+/** AES-256-GCM seal: ciphertext || tag(16). */
+export function rdr1Seal(dek: Buffer, nonce: Buffer, aad: Buffer, plaintext: Buffer): Buffer {
+  return aesGcmSeal(dek, nonce, aad, plaintext);
+}
+
+/** Wrap a 32-byte DEK under the storage KEK: nonce(12) || ct(32) || tag(16) = 60 B. */
+export function wrapRdr1Dek(dek: Buffer, masterKey: Uint8Array, objectId: string): Buffer {
+  return wrapDek(Buffer.from(dek), storageKek(masterKey), objectId);
+}
+
+/** Total ciphertext length for a plaintext size (re-export for range math). */
+export { ciphertextLength as rdr1CiphertextLength };

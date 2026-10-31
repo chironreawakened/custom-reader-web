@@ -1,4 +1,13 @@
-import type { ApiError, MeResponse } from "@reader/shared";
+import type {
+  ApiError,
+  DocumentMeta,
+  GetDocumentResponse,
+  ListDocumentsResponse,
+  MeResponse,
+  SectionResponse,
+  TocResponse,
+  ListSectionsResponse,
+} from "@reader/shared";
 
 /** Thin fetch client for the /v1 API. Same-origin; cookies carry the session. */
 
@@ -10,6 +19,18 @@ async function unwrap<T>(res: Response): Promise<T> {
 }
 
 const headers = { "X-Requested-With": "reader" };
+
+/** Multipart upload of a single EPUB file. Origin header is implied by the
+ *  same-origin request (CSRF check); we only add the X-Requested-With marker. */
+function uploadFile(file: File) {
+  const form = new FormData();
+  form.append("file", file);
+  return fetch("/v1/documents/upload", {
+    method: "POST",
+    headers,
+    body: form,
+  }).then((res) => unwrap<{ id: string; title: string; ingestState: string }>(res));
+}
 
 export const api = {
   /** null = not signed in (401). */
@@ -36,4 +57,26 @@ export const api = {
   logout(): Promise<void> {
     return fetch("/v1/auth/logout", { method: "POST", headers }).then(unwrap<void>);
   },
+
+  // ---- documents (slice 2) -------------------------------------------------
+  listDocuments(): Promise<ListDocumentsResponse> {
+    return fetch("/v1/documents", { headers }).then((r) => unwrap<ListDocumentsResponse>(r));
+  },
+  getDocument(id: string): Promise<GetDocumentResponse> {
+    return fetch(`/v1/documents/${id}`, { headers }).then((r) => unwrap<GetDocumentResponse>(r));
+  },
+  getToc(id: string): Promise<TocResponse> {
+    return fetch(`/v1/documents/${id}/toc`, { headers }).then((r) => unwrap<TocResponse>(r));
+  },
+  listSections(id: string): Promise<ListSectionsResponse> {
+    return fetch(`/v1/documents/${id}/sections`, { headers }).then((r) => unwrap<ListSectionsResponse>(r));
+  },
+  getSection(docId: string, sectionId: string): Promise<SectionResponse> {
+    return fetch(`/v1/documents/${docId}/sections/${sectionId}`, { headers }).then((r) => unwrap<SectionResponse>(r));
+  },
+  upload(file: File): Promise<{ id: string; title: string; ingestState: string }> {
+    return uploadFile(file);
+  },
 };
+
+export type { DocumentMeta };

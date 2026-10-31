@@ -1,5 +1,10 @@
 import { pgSchema } from "drizzle-orm/pg-core";
-import { index, integer, text, timestamp, uuid, varchar } from "drizzle-orm/pg-core";
+import { customType, index, integer, text, timestamp, uniqueIndex, uuid, varchar } from "drizzle-orm/pg-core";
+
+/** tsvector column (SPECS §9: only the tsvector of section text is stored). */
+export const tsvector = customType<{ data: string }>({
+  dataType: () => "tsvector",
+});
 
 // Tables live in the Postgres schema "app" (created by migration 0000).
 // NOTE: declare with pgSchema("app").table("users") — NOT pgTable("app.users"),
@@ -60,11 +65,111 @@ export const sessions = app.table(
   (t) => [index("sessions_user_idx").on(t.userId)],
 );
 
+// --- slice 2: epub ingestion (SPECS §11) ---
+
+export const documents = app.table(
+  "documents",
+  {
+    id: uuid("id").primaryKey(),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    type: text("type").$type<"epub" | "article" | "pdf">().notNull(),
+    title: text("title").notNull(),
+    author: text("author"),
+    language: text("language").$type<"english" | "finnish" | "simple">(),
+    status: text("status").$type<"inbox" | "later" | "archive">().notNull().default("inbox"),
+    sourceUrl: text("source_url"),
+    /** storage_objects.id of the RDR1-encrypted original upload. */
+    originalObjectId: uuid("original_object_id").references(() => storageObjects.id, { onDelete: "set null" }),
+    /**
+     * assets.id of the cover image. Deliberately NOT a typed `.references()`
+     * here: documents ↔ assets would be a two-way FK cycle that TypeScript
+     * 5.9 cannot infer (TS7022). The reverse FK constraint is added in the
+     * migration SQL (app.documents_cover_asset_id_fkey) instead.
+     */
+    coverAssetId: uuid("cover_asset_id"),
+    parserVersion: integer("parser_version").notNull().default(1),
+    ingestState: text("ingest_state").$type<"pending" | "processing" | "ready" | "failed">().notNull().default("pending"),
+    ingestError: text("ingest_error"),
+    wordCount: integer("word_count"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("documents_user_idx").on(t.userId, t.updatedAt)],
+);
+
+export const sections = app.table(
+  "sections",
+  {
+    id: uuid("id").primaryKey(),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    documentId: uuid("document_id").notNull().references(() => documents.id, { onDelete: "cascade" }),
+    idx: integer("idx").notNull(),
+    title: text("title"),
+    /** storage_objects.id of the RDR1-encrypted sanitized section HTML. */
+    htmlObjectId: uuid("html_object_id").references(() => storageObjects.id, { onDelete: "set null" }),
+    canonicalLength: integer("canonical_length"),
+    /** tsvector of the section's canonical text (SPECS §9). */
+    searchVector: tsvector("search_vector"),
+  },
+  (t) => [
+    uniqueIndex("sections_document_idx_unique").on(t.documentId, t.idx),
+    index("sections_search_idx").using("gin", t.searchVector),
+  ],
+);
+
+export const tocEntries = app.table(
+  "toc_entries",
+  {
+    id: uuid("id").primaryKey(),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    documentId: uuid("document_id").notNull().references(() => documents.id, { onDelete: "cascade" }),
+    parentId: uuid("parent_id"),
+    idx: integer("idx").notNull(),
+    label: text("label").notNull(),
+    sectionId: uuid("section_id").references(() => sections.id, { onDelete: "set null" }),
+    anchor: text("anchor"),
+  },
+  (t) => [index("toc_document_idx").on(t.documentId)],
+);
+
+export const assets = app.table(
+  "assets",
+  {
+    id: uuid("id").primaryKey(),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    documentId: uuid("document_id").notNull().references(() => documents.id, { onDelete: "cascade" }),
+    /** storage_objects.id of the RDR1-encrypted asset bytes. */
+    objectId: uuid("object_id").notNull().references(() => storageObjects.id, { onDelete: "set null" }),
+    role: text("role").$type<"image" | "cover" | "original">().notNull(),
+    mime: varchar("mime", { length: 127 }).notNull(),
+    width: integer("width"),
+    height: integer("height"),
+  },
+  (t) => [index("assets_document_idx").on(t.documentId)],
+);
+
+export const backups = app.table(
+  "backups",
+  {
+    id: uuid("id").primaryKey(),
+    /** storage_objects.id of the RDR1-encrypted pg_dump. */
+    objectId: uuid("object_id").notNull().references(() => storageObjects.id, { onDelete: "cascade" }),
+    kind: text("kind").$type<"daily" | "weekly">().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("backups_kind_idx").on(t.kind, t.createdAt)],
+);
+
 // --- remaining tables (SPECS §11), added in the slices that use them ---
-// documents, sections, toc_entries, assets, tags, document_tags, highlights,
-// reading_progress, user_settings, tts_cache, backups  ->  their slices.
+// tags, document_tags, highlights, reading_progress, user_settings,
+// tts_cache  ->  their slices.
 
 export type User = typeof users.$inferSelect;
 export type StorageObject = typeof storageObjects.$inferSelect;
 export type LoginCode = typeof loginCodes.$inferSelect;
 export type Session = typeof sessions.$inferSelect;
+export type Document = typeof documents.$inferSelect;
+export type Section = typeof sections.$inferSelect;
+export type TocEntry = typeof tocEntries.$inferSelect;
+export type Asset = typeof assets.$inferSelect;
+export type Backup = typeof backups.$inferSelect;

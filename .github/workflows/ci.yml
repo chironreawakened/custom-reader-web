@@ -76,16 +76,39 @@ jobs:
           done
           echo "api did not become ready" >&2; tail -50 /tmp/api.log >&2; exit 1
 
+      - name: Start worker (epub.process + backup)
+        run: |
+          nohup env \
+            APP_MASTER_KEY="$(node -e "process.stdout.write(Buffer.alloc(32,1).toString('base64'))")" \
+            HIPPUS_ENDPOINT=http://127.0.0.1:9000 \
+            HIPPUS_REGION=us-east-1 \
+            HIPPUS_BUCKET=reader-e2e \
+            HIPPUS_ACCESS_KEY=minioadmin \
+            HIPPUS_SECRET_KEY=*** \
+            POSTGRES_URL=postgres://reader:***@127.0.0.1:5432/reader \
+            ALLOWED_EMAIL=e2e@reader.test \
+            RDR_HOSTNAME=127.0.0.1:3100 \
+            RDR_ENV=ci \
+            MAILER=console \
+            CONSOLE_MAILBOX=/tmp/e2e-mailbox.log \
+            PORT=3100 \
+            RDR_WEB_DIST=$PWD/apps/web/dist \
+            node apps/api/dist/worker.js > /tmp/worker.log 2>&1 &
+          sleep 5
+          echo "worker started"
+
       - name: Run Playwright
         run: pnpm --filter @reader/e2e test:e2e
         env:
           E2E_BASE_URL: http://127.0.0.1:3100
           E2E_MAILBOX: /tmp/e2e-mailbox.log
+          REPO_ROOT: ${{ github.workspace }}
 
       - name: Diagnostics on failure
         if: failure()
         run: |
           echo "--- api.log ---"; tail -80 /tmp/api.log || true
+          echo "--- worker.log ---"; tail -80 /tmp/worker.log || true
           echo "--- mailbox ---"; cat /tmp/e2e-mailbox.log || true
           docker compose -f e2e/docker-compose.e2e.yml logs || true
 

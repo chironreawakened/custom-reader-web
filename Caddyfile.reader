@@ -16,6 +16,10 @@ peisetti.duckdns.org {
 
 	# API
 	handle /v1/* {
+		# Upload cap (SPECS): 200 MB; the API enforces it too.
+		request_body {
+			max_size 209715200
+		}
 		reverse_proxy 172.18.0.1:3100
 	}
 
