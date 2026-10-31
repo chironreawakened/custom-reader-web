@@ -78,7 +78,7 @@ Local stack: postgres:17 + adobe/s3mock + API + worker on 127.0.0.1:3101,
 `MAILER=console`; migration 0004 applied before boot.
 
 - Gates: `pnpm build` green; `pnpm -r lint` / `typecheck` 4/4; unit
-  tests green (shared +62, api +38 incl. 6 new DRM + 6 backup-schedule).
+  tests green (79 shared + 59 api, incl. 6 new DRM + 6 backup-schedule).
 - Live curl loop: login (code from `/tmp/local-mailbox.log`) → upload
   fixture → worker ingest → TOC; then 10 progress/settings round-trips:
   GET nulls → PUT no-CSRF 403 → PUT 200 → stale PUT 409 → newer PUT 200
@@ -159,3 +159,16 @@ Node: old logic → `null`, fixed logic → the 4th code.
 run (login 2, documents 1, progress 1) against the 5/15 min IP limiter.
 A fifth login spec would get a silent 202 (no mail) — noted in
 `login.spec.ts`.
+
+**Second e2e fix (commit 3):** with login working, the progress spec
+failed on its *first* assertion — "title page is the default landing
+section". It was wrong by construction: `documents.spec.ts` runs first
+as the SAME user and its autosave leaves the shared user's progress at
+Chapter One, so a fresh open correctly *restored* that chapter (the
+feature the spec exists to test) instead of showing the title page.
+The spec now asserts a section renders, then jumps to Chapter One —
+the restore-assertions after the reload remain the real check.
+
+**Final state:** CI 41217604688 fully green (test 138 + images + e2e
+4/4 in 16.9 s); `slice-3` tag moved from `be17ffe` (red) to `11c1643`
+(green).
