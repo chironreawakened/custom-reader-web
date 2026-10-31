@@ -128,3 +128,34 @@ Local stack: postgres:17 + adobe/s3mock + API + worker on 127.0.0.1:3101,
   unchanged; slice 3 uses the existing `GET /v1/documents/:id/toc`
   response (extended with `parentId` on `TocEntryDto`) rather than a
   new nested-TOC endpoint.
+
+## CI e2e fix (same day, commit 2)
+
+The first push (be17ffe) failed the CI **e2e** job: the new
+`progress.spec.ts` login timed out with "code never reached the console
+mailbox" — yet the failure diagnostics proved its code *had* been
+written to the mailbox (4th line, 3 ms after its `request-code` 202).
+
+**Root cause — off-by-one in the mailbox baseline.** The spec captured
+its baseline as `readFileSync(...).split("\n").length` (raw split),
+while its scan used `split("\n").filter(Boolean)`. The console mailer
+ends every line with `\n`, so the raw split carries one phantom `""` —
+the baseline was 4, but the new code sat at filtered index 3, so the
+backward scan (`i = 3 down to 4`) iterated zero times → `null` → 15 s
+timeout. Only `progress.spec.ts` was affected: it was the only
+baseline-based reader running against a **non-empty** mailbox (the
+first spec's baseline was 0 in both counts; the `login` spec reads the
+latest code with no baseline). The rate limiter was never triggered
+(4 request-code calls < the 5/15 min cap; all returned 202+mail).
+
+**Fix:** one shared `e2e/mailbox.ts` helper — `mailboxLines()` (filtered),
+`latestCodeSince(baseline)` (same filtered list, so the baseline can
+never overshoot), `requestCode(page)`, `verifyCode(page, code)`,
+`login(page)` — and all three specs import from it (the duplicated
+per-spec helpers are gone). Verified by replaying the exact CI state in
+Node: old logic → `null`, fixed logic → the 4th code.
+
+**Rate-limit budget for the e2e suite:** 4 request-code calls per CI
+run (login 2, documents 1, progress 1) against the 5/15 min IP limiter.
+A fifth login spec would get a silent 202 (no mail) — noted in
+`login.spec.ts`.

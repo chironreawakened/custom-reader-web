@@ -1,5 +1,5 @@
-import { test, expect, type Page } from "@playwright/test";
-import { readFileSync } from "node:fs";
+import { test, expect } from "@playwright/test";
+import { login } from "./mailbox.js";
 
 // Slice 3 e2e: reading progress + reader prefs survive a page reload.
 //
@@ -11,51 +11,6 @@ import { readFileSync } from "node:fs";
 //
 // NOTE: logs in as the single ALLOWED_EMAIL with single-use codes, so the
 // suite must run serially (workers: 1 in the config).
-
-const EMAIL = "e2e@reader.test";
-
-function mailboxLines(): string[] {
-  try {
-    return readFileSync(process.env.E2E_MAILBOX!, "utf8").split("\n");
-  } catch {
-    return [];
-  }
-}
-
-function latestCodeSince(mailbox: string, baseline: number): string | null {
-  const lines = readFileSync(mailbox, "utf8").split("\n").filter(Boolean);
-  for (let i = lines.length - 1; i >= baseline; i--) {
-    const m = /code is (\d{6})/i.exec(lines[i]!);
-    if (m) return m[1]!;
-  }
-  return null;
-}
-
-async function login(page: Page): Promise<void> {
-  const mailbox = process.env.E2E_MAILBOX;
-  if (!mailbox) throw new Error("E2E_MAILBOX not set");
-  const baseline = mailboxLines().length;
-
-  await page.goto("/");
-  await page.getByTestId("email-input").fill(EMAIL);
-  await page.getByTestId("request-btn").click();
-  await page.getByTestId("code-first").waitFor();
-  const code = await expect
-    .poll(() => {
-      try {
-        return latestCodeSince(mailbox, baseline);
-      } catch {
-        return null;
-      }
-    }, { timeout: 15_000, message: "code never reached the console mailbox" })
-    .toMatch(/^\d{6}$/)
-    .then(() => latestCodeSince(mailbox, baseline)!);
-  const inputs = page.locator('input[inputmode="numeric"]');
-  for (let i = 0; i < 6; i++) {
-    await inputs.nth(i).fill(code[i]!);
-  }
-  await expect(page.getByTestId("signed-in")).toBeVisible({ timeout: 10_000 });
-}
 
 test.describe.configure({ mode: "serial" });
 
