@@ -1,5 +1,6 @@
 import { pgSchema } from "drizzle-orm/pg-core";
-import { customType, index, integer, text, timestamp, uniqueIndex, uuid, varchar } from "drizzle-orm/pg-core";
+import { customType, index, integer, jsonb, primaryKey, text, timestamp, uniqueIndex, uuid, varchar } from "drizzle-orm/pg-core";
+import type { Locator, ReaderPrefs } from "@reader/shared";
 
 /** tsvector column (SPECS §9: only the tsvector of section text is stored). */
 export const tsvector = customType<{ data: string }>({
@@ -160,9 +161,36 @@ export const backups = app.table(
   (t) => [index("backups_kind_idx").on(t.kind, t.createdAt)],
 );
 
+// --- slice 3: reading progress and user settings (SPECS §11) ---
+
+/** Last read position per (user, document); composite PK (SPECS §11). */
+export const readingProgress = app.table(
+  "reading_progress",
+  {
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    documentId: uuid("document_id").notNull().references(() => documents.id, { onDelete: "cascade" }),
+    /** SPECS §8 locator (reflow/pdf), stored as jsonb. */
+    locator: jsonb("locator").$type<Locator>().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.documentId] })],
+);
+
+/** Per-user settings. Slice 3 stores reader_prefs only; the TTS/OpenAI-key
+ *  columns exist per SPECS §11 but get their routes in later slices. */
+export const userSettings = app.table("user_settings", {
+  userId: uuid("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
+  openaiKeyEnc: text("openai_key_enc"),
+  openaiKeyLast4: text("openai_key_last4"),
+  keyVersion: integer("key_version"),
+  ttsModel: text("tts_model"),
+  ttsVoice: text("tts_voice"),
+  /** { theme, fontSize } — the reader display preferences. */
+  readerPrefs: jsonb("reader_prefs").$type<ReaderPrefs>(),
+});
+
 // --- remaining tables (SPECS §11), added in the slices that use them ---
-// tags, document_tags, highlights, reading_progress, user_settings,
-// tts_cache  ->  their slices.
+// tags, document_tags, highlights, tts_cache  ->  their slices.
 
 export type User = typeof users.$inferSelect;
 export type StorageObject = typeof storageObjects.$inferSelect;
@@ -173,3 +201,5 @@ export type Section = typeof sections.$inferSelect;
 export type TocEntry = typeof tocEntries.$inferSelect;
 export type Asset = typeof assets.$inferSelect;
 export type Backup = typeof backups.$inferSelect;
+export type ReadingProgress = typeof readingProgress.$inferSelect;
+export type UserSettings = typeof userSettings.$inferSelect;

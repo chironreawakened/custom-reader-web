@@ -2,8 +2,12 @@ import type {
   ApiError,
   DocumentMeta,
   GetDocumentResponse,
+  GetSettingsResponse,
   ListDocumentsResponse,
   MeResponse,
+  ProgressResponse,
+  PutProgressBody,
+  PutSettingsBody,
   SectionResponse,
   TocResponse,
   ListSectionsResponse,
@@ -76,6 +80,28 @@ export const api = {
   },
   upload(file: File): Promise<{ id: string; title: string; ingestState: string }> {
     return uploadFile(file);
+  },
+
+  // ---- progress + settings (slice 3) ---------------------------------------
+  getProgress(docId: string): Promise<ProgressResponse> {
+    return fetch(`/v1/progress/${docId}`, { headers }).then((r) => unwrap<ProgressResponse>(r));
+  },
+  putProgress(docId: string, body: PutProgressBody): Promise<ProgressResponse> {
+    return fetch(`/v1/progress/${docId}`, {
+      method: "PUT",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }).then((r) => unwrap<ProgressResponse>(r));
+  },
+  getSettings(): Promise<GetSettingsResponse> {
+    return fetch("/v1/settings", { headers }).then((r) => unwrap<GetSettingsResponse>(r));
+  },
+  putSettings(body: PutSettingsBody): Promise<GetSettingsResponse> {
+    return fetch("/v1/settings", {
+      method: "PUT",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }).then((r) => unwrap<GetSettingsResponse>(r));
   },
 };
 

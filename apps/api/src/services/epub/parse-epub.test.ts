@@ -123,6 +123,72 @@ describe("parseEpub — sanitization", () => {
   });
 });
 
+describe("parseEpub — DRM detection (slice 3)", () => {
+  it("signal 1: an adobe-drm file path aborts the ingest", async () => {
+    const buf = await buildFixtureEpub({
+      ...MINIMAL,
+      extraFiles: { "OEBPS/adobe-drm/adept": new TextEncoder().encode("drmarker") },
+    });
+    const { drm } = await parseEpub(buf);
+    expect(drm).not.toBeNull();
+    expect(drm!.reason).toBe("Adobe ADEPT DRM detected");
+    expect(drm!.where).toContain("adobe-drm");
+  });
+
+  it("signal 2: a .drm file path aborts the ingest", async () => {
+    const buf = await buildFixtureEpub({
+      ...MINIMAL,
+      extraFiles: { "OEBPS/protection/keys.drm": new TextEncoder().encode("x") },
+    });
+    const { drm } = await parseEpub(buf);
+    expect(drm).not.toBeNull();
+    expect(drm!.reason).toBe("DRM container detected");
+    expect(drm!.where).toContain("keys.drm");
+  });
+
+  it("signal 3: an ADEPT meta name in the OPF aborts the ingest", async () => {
+    const buf = await buildFixtureEpub({
+      ...MINIMAL,
+      opfMeta: ['<meta name="ADEPT" content="v1"/>'],
+    });
+    const { drm } = await parseEpub(buf);
+    expect(drm).not.toBeNull();
+    // parse-epub wraps OPF XML hits with the OPF path (see the detectDrmInXml call site).
+    expect(drm!.reason).toBe("DRM metadata detected in OPF");
+    expect(drm!.where).toContain("content.opf");
+  });
+
+  it("signal 4: a key-system element in the OPF aborts the ingest", async () => {
+    const buf = await buildFixtureEpub({
+      ...MINIMAL,
+      opfMeta: ['<key-system name="com.adobe.ADEPT"/>'],
+    });
+    const { drm } = await parseEpub(buf);
+    expect(drm).not.toBeNull();
+    expect(drm!.reason).toBe("DRM metadata detected in OPF");
+    expect(drm!.where).toContain("content.opf");
+  });
+
+  it("a DRM hit yields an empty epub (sections never parsed)", async () => {
+    const buf = await buildFixtureEpub({
+      ...MINIMAL,
+      extraFiles: { "OEBPS/x.drm": new TextEncoder().encode("x") },
+    });
+    const { epub } = await parseEpub(buf);
+    expect(epub.sections).toHaveLength(0);
+    expect(epub.toc).toHaveLength(0);
+    expect(epub.assets).toHaveLength(0);
+  });
+
+  it("benign metadata (cover, ncx) does NOT trip DRM detection", async () => {
+    const buf = await buildFixtureEpub({ ...MINIMAL, ncx: true });
+    const { drm, epub } = await parseEpub(buf);
+    expect(drm).toBeNull();
+    expect(epub.sections).toHaveLength(2);
+    expect(epub.toc.map((t) => t.label)).toEqual(["Test Book", "Chapter One"]);
+  });
+});
+
 describe("parseEpub — failures", () => {
   it("rejects non-zip bytes", async () => {
     await expect(parseEpub(new TextEncoder().encode("definitely not a zip"))).rejects.toThrow(EpubError);

@@ -29,6 +29,10 @@ export interface FixtureSpec {
   cover?: string;
   /** href of the cover image within the OPF directory (default "cover.png"). */
   coverHref?: string;
+  /** Raw <meta …/> lines injected into the OPF <metadata> (DRM signal tests). */
+  opfMeta?: string[];
+  /** Extra zip entries (path → bytes), unlisted in the manifest (DRM signal tests). */
+  extraFiles?: Record<string, Uint8Array>;
 }
 
 const xhtml = (body: string) =>
@@ -76,10 +80,11 @@ export async function buildFixtureEpub(spec: FixtureSpec): Promise<Uint8Array> {
   const ncxMeta = spec.ncx
     ? `\n    <meta name="ncx" content="ncx"/>`
     : "";
+  const extraMeta = (spec.opfMeta ?? []).map((m) => `\n    ${m}`).join("");
 
   const opf = `<?xml version="1.0" encoding="utf-8"?>\n<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">\n  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">\n    <dc:identifier id="uid">urn:uuid:11111111-2222-3333-4444-555555555555</dc:identifier>\n    <dc:title>${escapeXml(spec.title)}</dc:title>${
     spec.author ? `\n    <dc:creator>${escapeXml(spec.author)}</dc:creator>` : ""
-  }${languageLine}${coverMeta}${ncxMeta}\n  </metadata>\n  <manifest>\n${manifestItems.join("\n    ")}\n  </manifest>\n  <spine${spec.ncx ? ' toc="ncx"' : ""}>\n${spec.spine
+  }${languageLine}${coverMeta}${ncxMeta}${extraMeta}\n  </metadata>\n  <manifest>\n${manifestItems.join("\n    ")}\n  </manifest>\n  <spine${spec.ncx ? ' toc="ncx"' : ""}>\n${spec.spine
     .map((s) => `    <itemref idref="${s.id}"/>`)
     .join("\n")}\n  </spine>\n</package>\n`;
 
@@ -89,6 +94,7 @@ export async function buildFixtureEpub(spec: FixtureSpec): Promise<Uint8Array> {
   spec.spine.forEach((s, i) => zip.file(`OEBPS/${s.href}`, spineHtmls[i]!));
   if (spec.toc) zip.file("OEBPS/nav.xhtml", nav);
   if (spec.ncx) zip.file("OEBPS/toc.ncx", ncxXml(spec));
+  for (const [path, bytes] of Object.entries(spec.extraFiles ?? {})) zip.file(path, bytes);
 
   return zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
 }

@@ -21,6 +21,7 @@ import { createS3Storage } from "./storage/s3.js";
 import { createObjectStore } from "./storage/object-store.js";
 import { EpubError, PARSER_VERSION, parseEpub } from "./services/epub/parse-epub.js";
 import { JOB_BACKUP_NIGHTLY, JOB_EPUB_PROCESS, type EpubProcessJob } from "./jobs/boss.js";
+import { backupKindFor } from "./jobs/backup-schedule.js";
 
 const pExecFile = promisify(execFile);
 
@@ -295,9 +296,11 @@ await boss.work(
   JOB_BACKUP_NIGHTLY,
   {},
   async () => {
-    // Monday's run counts as the weekly backup; the rest are daily.
-    const dow = new Date().getUTCDay();
-    await runBackup(dow === 1 ? "weekly" : "daily");
+    // Monday's run counts as the weekly backup. The weekday is derived in
+    // Europe/Helsinki (backup-schedule.ts) instead of UTC so the intent is
+    // explicit and it stays correct if the cron hour ever moves below the
+    // UTC offset (03:00 EET/EEST currently fires on the same UTC day).
+    await runBackup(backupKindFor());
   },
 );
 
