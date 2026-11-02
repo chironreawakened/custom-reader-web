@@ -6,3 +6,6 @@ dist/
 # Local-only verification scratch (never in CI, never on prod)
 e2e/.local-verify.env
 e2e/docker-compose.local-verify.yml
+
+# Playwright run artifacts (local + CI scratch)
+e2e/test-results/
