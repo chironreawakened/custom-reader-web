@@ -120,6 +120,32 @@ highlights panel, and export all highlights of a book as Markdown.
 6. **Export** in the panel → a `.md` download: each highlight as
    `> "quoted text" — Section Title` with the note under it.
 
+## Post-deploy incident: long-anchor crash (fixed `1f7894e`)
+
+Found during post-deploy live verification (2026-11-02) against real
+content — a 62,778-char section with a 109-char anchor:
+
+- **Symptom:** `GET /v1/highlights` and `GET /v1/export/highlights.md`
+  returned **500** `Pattern too long for this browser.`. The same throw
+  would have crashed the web reader's `placeRanges` (it calls the same
+  `resolveAnchor`).
+- **Root cause:** `resolveAnchor` step 3 (fuzzy) calls
+  diff-match-patch `match_main` → `match_bitap_`, which **throws** for
+  patterns longer than its `Match_MaxBits` (32). Any long highlight whose
+  anchor misses the literal ladder (steps 1–2) hit it. CI was green
+  because every fixture uses short text and ≤24-char phrases — the
+  boundary was never crossed.
+- **Fix:** `fuzzyFind` skips the fuzzy step for patterns > 32 chars
+  (`FUZZY_MAX_PATTERN`); they resolve via the literal ladder or flag as
+  orphaned (shown in the list, never dropped — the safe direction).
+- **Regression tests:** 2 in `packages/shared/src/anchors.test.ts`
+  (long orphaned anchor doesn't throw; long resolvable anchor still
+  resolves) + 2 at the route level (list + export no longer 500). The
+  throw-reproduction was verified by temporarily reverting the guard.
+- **Deploy:** redeployed at `1f7894e`; `slice-4` tag moved to the new
+  final commit. No data loss: the one test highlight row created during
+  the incident was soft-deleted.
+
 ## Known gaps / follow-ups
 
 - Highlight editing is colour/note only — the range itself can't be
