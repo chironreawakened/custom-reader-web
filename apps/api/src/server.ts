@@ -11,6 +11,7 @@ import { closeDb } from "./db/client.js";
 import { registerAuth } from "./routes/auth.js";
 import { registerDocuments } from "./routes/documents.js";
 import { registerProgressSettings } from "./routes/progress-settings.js";
+import { registerHighlights } from "./routes/highlights.js";
 import { createBoss } from "./jobs/boss.js";
 import type { AppConfig } from "./config.js";
 import type { Mailer } from "./services/mailer.js";
@@ -56,6 +57,7 @@ export async function buildServer(cfg = loadConfig(), opts: BuildServerOptions =
   });
   await registerDocuments(app, { config: cfg, objectStore, boss, now: opts.now });
   await registerProgressSettings(app, { config: cfg, now: opts.now });
+  await registerHighlights(app, { config: cfg, objectStore, now: opts.now });
 
   // CI e2e only: serve the built SPA so Playwright can drive the real UI at the
   // API origin (in prod Caddy serves /srv/reader/web-dist instead).

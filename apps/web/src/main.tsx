@@ -9,7 +9,18 @@ import {
 } from "@tanstack/react-query";
 import { api } from "./api";
 import type { DocumentMeta } from "./api";
-import type { TocEntryDto } from "@reader/shared";
+import type { HighlightItem, TocEntryDto } from "@reader/shared";
+import type { PatchHighlightBody, PostHighlightBody } from "@reader/shared/highlights";
+// Value imports go through subpaths: the shared barrel re-exports node-only
+// crypto modules (rdr1, asset-url) that the browser bundle must not reach.
+import {
+  buildReflowAnchor,
+  HIGHLIGHT_COLORS,
+  resolveAnchor,
+  type CanonicalSelection,
+  type HighlightColor,
+} from "@reader/shared/anchors";
+import { canonicalText, type CanonicalMap, type CTRoot } from "@reader/shared/canonical-text";
 // Subpath import: the shared barrel re-exports node-only crypto modules
 // (rdr1, asset-url) that the browser bundle must not reach.
 import { DEFAULT_READER_PREFS, MAX_FONT_SIZE, MIN_FONT_SIZE, type ReaderTheme } from "@reader/shared/settings";
@@ -348,6 +359,89 @@ function Reader({ docId, onBack }: { docId: string; onBack: () => void }) {
     };
   }, [sectionId, section.data, pendingScroll, saveProgress]);
 
+  // ---- slice 4: highlights ---------------------------------------------------
+  const [showHighlights, setShowHighlights] = React.useState(false);
+  const sectionRef = React.useRef<HTMLElement | null>(null);
+  const highlights = useQuery({
+    queryKey: ["highlights", docId],
+    queryFn: () => api.listHighlights(docId),
+    enabled: doc.data?.ingestState === "ready",
+  });
+  const [pendingSel, setPendingSel] = React.useState<{ start: number; end: number; text: string } | null>(null);
+  const createHighlight = useMutation({
+    mutationFn: (body: PostHighlightBody) => api.createHighlight(body),
+    onSuccess: () => {
+      setPendingSel(null);
+      void qc.invalidateQueries({ queryKey: ["highlights", docId] });
+    },
+  });
+  const patchHighlight = useMutation({
+    mutationFn: (a: { id: string; body: PatchHighlightBody }) => api.patchHighlight(a.id, a.body),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["highlights", docId] }),
+  });
+  const deleteHighlight = useMutation({
+    mutationFn: (id: string) => api.deleteHighlight(id),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["highlights", docId] }),
+  });
+
+  // A non-collapsed selection released inside the section text → the floating
+  // save bar. Offsets are canonical (shared canonicalText), so they match the
+  // server's view of the section byte-for-byte.
+  const onMouseUp = React.useCallback(() => {
+    if (!sectionRef.current) return;
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
+      if (sel) sel.removeAllRanges();
+      return;
+    }
+    const range = sel.getRangeAt(0);
+    if (!sectionRef.current.contains(range.commonAncestorContainer)) {
+      sel.removeAllRanges();
+      return;
+    }
+    const sec = section.data;
+    if (!sec) return;
+    const { text, map } = canonicalText(sectionRef.current as unknown as CTRoot);
+    const a = { node: range.startContainer, offset: range.startOffset, isEnd: false };
+    const b = { node: range.endContainer, offset: range.endOffset, isEnd: true };
+    const c1 = pointToCanonical(a.node, a.offset, a.isEnd, map);
+    const c2 = pointToCanonical(b.node, b.offset, b.isEnd, map);
+    if (c1 === null || c2 === null) return;
+    let start = Math.min(c1, c2);
+    let end = Math.max(c1, c2);
+    // Trim invisible block separators from the edges so `exact` is exactly
+    // what the user visually selected (anchors still resolve — separators
+    // sit between characters, never inside the selected run).
+    while (start < end && text[start] === "\n") start++;
+    while (end > start && text[end - 1] === "\n") end--;
+    if (end <= start) {
+      sel.removeAllRanges();
+      return;
+    }
+    setPendingSel({ start, end, text: text.slice(start, end) });
+  }, [section.data]);
+
+  // Re-render stored highlights on top of the section whenever the section or
+  // the highlight list changes: clear old marks, re-resolve anchors (SPECS §7
+  // ladder), wrap each resolved range in a <mark>.
+  React.useEffect(() => {
+    const root = sectionRef.current;
+    const sec = section.data;
+    if (!root || !sec) return;
+    clearMarks(root);
+    const items = (highlights.data?.items ?? []).filter((h) => h.sectionId === sec.id);
+    if (items.length === 0) return;
+    const { text, map } = canonicalText(root as unknown as CTRoot);
+    const ranges: PlacedRange[] = [];
+    for (const h of items) {
+      if (h.anchor.kind !== "reflow") continue;
+      const res = resolveAnchor(h.anchor, text);
+      if (res.status !== "resolved") continue; // orphaned: listed, not drawn
+      ranges.push({ hlId: h.id, color: h.color, note: h.note, start: res.start, end: res.end });
+    }
+    placeRanges(root, map, ranges);
+  }, [section.data, highlights.data]);
+
   if (doc.isError) return <ErrorBox message={String(doc.error)} onBack={onBack} />;
   if (!doc.data) return <p data-testid="reader-loading">Loading…</p>;
 
@@ -379,7 +473,7 @@ function Reader({ docId, onBack }: { docId: string; onBack: () => void }) {
       data-theme={prefs.theme}
       style={{ background: theme.bg, color: theme.fg, borderRadius: 12, padding: 16, transition: "background 120ms" }}
     >
-      <BackBar onBack={onBack} title={d.title} />
+      <BackBar onBack={onBack} title={d.title} onHighlights={() => setShowHighlights(true)} />
       <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
         {d.coverUrl ? (
           <img
@@ -408,19 +502,71 @@ function Reader({ docId, onBack }: { docId: string; onBack: () => void }) {
         </div>
       </div>
 
-      <div id="content" style={{ marginTop: 20, lineHeight: 1.7, fontSize: `${prefs.fontSize}px` }}>
+      <div id="content" style={{ marginTop: 20, lineHeight: 1.7, fontSize: `${prefs.fontSize}px` }} onMouseUp={onMouseUp}>
         {section.isError ? (
           <ErrorBox message={String(section.error)} onBack={() => setSectionId(null)} />
         ) : section.data ? (
           <article
             data-testid="section"
+            ref={sectionRef}
             // Server-side sanitized (slice 1 sanitizer) with asset URLs rewritten to signed URLs.
+            // Slice 4: highlights are drawn on top as <mark> by an effect.
             dangerouslySetInnerHTML={{ __html: section.data.html }}
           />
         ) : (
           <p data-testid="section-loading">Loading section…</p>
         )}
       </div>
+
+      {pendingSel ? (
+        <div
+          data-testid="save-highlight-bar"
+          style={{
+            position: "sticky",
+            bottom: 8,
+            margin: "12px 0 0",
+            display: "flex",
+            gap: 8,
+            alignItems: "center",
+            padding: "8px 12px",
+            background: "rgba(0,0,0,0.75)",
+            color: "#fff",
+            borderRadius: 10,
+            fontSize: 14,
+          }}
+        >
+          <span data-testid="save-highlight-preview" style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            “{pendingSel.text.slice(0, 80)}{pendingSel.text.length > 80 ? "…" : ""}”
+          </span>
+          <button
+            data-testid="save-highlight-btn"
+            disabled={createHighlight.isPending}
+            onClick={() => {
+              const sid = section.data!.id;
+              const { text } = canonicalText(sectionRef.current! as unknown as CTRoot);
+              const anchor = buildReflowAnchor(sid, { start: pendingSel.start, end: pendingSel.end }, text);
+              createHighlight.mutate({ documentId: docId, anchor, exact: anchor.exact, color: null, note: null });
+            }}
+          >
+            {createHighlight.isPending ? "Saving…" : "Highlight"}
+          </button>
+          <button data-testid="cancel-highlight-btn" onClick={() => setPendingSel(null)}>
+            Cancel
+          </button>
+        </div>
+      ) : null}
+
+      {showHighlights ? (
+        <HighlightsPanel
+          docId={docId}
+          items={highlights.data?.items ?? []}
+          onClose={() => setShowHighlights(false)}
+          onColor={(id, color) => patchHighlight.mutate({ id, body: { color } })}
+          onNote={(id, note) => patchHighlight.mutate({ id, body: { note } })}
+          onDelete={(id) => deleteHighlight.mutate(id)}
+          deleting={deleteHighlight.isPending}
+        />
+      ) : null}
 
       <Pager
         prevId={section.data?.prevSectionId ?? null}
@@ -535,15 +681,362 @@ function Pager({
   );
 }
 
-function BackBar({ onBack, title }: { onBack: () => void; title: string }) {
+// Slice 4 — the highlights page: every highlight in this document (newest
+// first, as the API returns it), with colour, note and delete inline, plus
+// the Markdown export. Orphaned items (anchor no longer resolves in the
+// section text) are listed, flagged, never hidden.
+function NoteEditor({
+  value,
+  onCommit,
+  disabled,
+}: {
+  value: string | null;
+  onCommit: (note: string | null) => void;
+  disabled: boolean;
+}) {
+  const [draft, setDraft] = React.useState(value ?? "");
+  React.useEffect(() => setDraft(value ?? ""), [value]);
+  return (
+    <input
+      data-testid="note-input"
+      value={draft}
+      placeholder="Add a note…"
+      disabled={disabled}
+      style={{ width: "100%", fontSize: 13, padding: 4, boxSizing: "border-box" }}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => {
+        const next = draft.trim() === "" ? null : draft.trim();
+        if (next !== value) onCommit(next);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+      }}
+    />
+  );
+}
+
+function HighlightsPanel({
+  docId,
+  items,
+  onClose,
+  onColor,
+  onNote,
+  onDelete,
+  deleting,
+}: {
+  docId: string;
+  items: HighlightItem[];
+  onClose: () => void;
+  onColor: (id: string, color: HighlightColor | null) => void;
+  onNote: (id: string, note: string | null) => void;
+  onDelete: (id: string) => void;
+  deleting: boolean;
+}) {
+  return (
+    <div
+      data-testid="highlights-panel"
+      style={{
+        marginTop: 16,
+        border: "1px solid #ddd8",
+        borderRadius: 12,
+        padding: 12,
+        background: "#00000008",
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        <h3 style={{ margin: 0 }}>Highlights ({items.length})</h3>
+        <div style={{ display: "flex", gap: 8 }}>
+          <a
+            data-testid="export-highlights-btn"
+            href={api.exportHighlightsUrl(docId)}
+            style={{ fontSize: 13 }}
+          >
+            Export .md
+          </a>
+          <button type="button" onClick={onClose} data-testid="highlights-close-btn" style={{ fontSize: 13 }}>
+            Close
+          </button>
+        </div>
+      </div>
+      {items.length === 0 ? (
+        <p style={{ opacity: 0.7, fontSize: 14, margin: 0 }}>
+          No highlights yet — select text in a chapter to save one.
+        </p>
+      ) : (
+        <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: 10 }}>
+          {items.map((h) => (
+            <li
+              key={h.id}
+              data-testid="highlight-item"
+              data-orphaned={h.orphaned ? "true" : "false"}
+              style={{ padding: 10, borderRadius: 8, border: "1px solid #e0e0e0", background: "#fff" }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "baseline" }}>
+                <span
+                  data-testid="highlight-text"
+                  style={{ background: HIGHLIGHT_BG[h.color ?? "yellow"], borderRadius: 3, padding: "0 3px" }}
+                >
+                  {h.exact.length > 160 ? h.exact.slice(0, 160) + "…" : h.exact}
+                </span>
+                {h.orphaned ? (
+                  <span data-testid="orphaned-badge" style={{ fontSize: 12, opacity: 0.7 }} title="This text is no longer in the book.">
+                    (orphaned)
+                  </span>
+                ) : null}
+              </div>
+              <div style={{ opacity: 0.5, fontSize: 12, margin: "4px 0" }}>{h.sectionTitle ?? "unknown section"}</div>
+              <div style={{ display: "flex", gap: 6, marginBottom: 6 }} data-testid="color-picker">
+                {HIGHLIGHT_COLORS.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    data-testid={`color-btn-${c}`}
+                    title={h.color === c ? "Click to remove" : c}
+                    aria-pressed={h.color === c}
+                    onClick={() => onColor(h.id, h.color === c ? null : c)}
+                    style={{
+                      width: 22,
+                      height: 22,
+                      borderRadius: 6,
+                      border: h.color === c ? "2px solid #333" : "1px solid #9998",
+                      background: HIGHLIGHT_BG[c],
+                      cursor: "pointer",
+                    }}
+                  />
+                ))}
+              </div>
+              <NoteEditor value={h.note} onCommit={(note) => onNote(h.id, note)} disabled={deleting} />
+              <div style={{ marginTop: 6, textAlign: "right" }}>
+                <button
+                  type="button"
+                  data-testid="delete-highlight-btn"
+                  disabled={deleting}
+                  onClick={() => onDelete(h.id)}
+                  style={{ fontSize: 12, color: "crimson" }}
+                >
+                  Delete
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function BackBar({ onBack, title, onHighlights }: { onBack: () => void; title: string; onHighlights?: () => void }) {
   return (
     <div style={{ marginBottom: 12 }}>
       <button onClick={onBack} type="button" data-testid="back-btn" style={{ padding: "6px 12px", borderRadius: 8 }}>
         ← Library
       </button>
       <span style={{ opacity: 0.5, fontSize: 13, marginLeft: 10 }}>{title}</span>
+      {onHighlights ? (
+        <button
+          type="button"
+          data-testid="highlights-btn"
+          onClick={onHighlights}
+          style={{ marginLeft: 10, padding: "6px 12px", borderRadius: 8 }}
+        >
+          Highlights
+        </button>
+      ) : null}
     </div>
   );
+}
+
+// ===========================================================================
+// Slice 4 — highlights (select → anchor → save → re-render → panel)
+//
+// The section HTML is rendered via dangerouslySetInnerHTML; highlights are
+// drawn on top with a walk that wraps the canonical ranges in <mark> tags.
+// Selection → anchor uses the same shared canonicalText() the server runs,
+// so offsets match byte-for-byte (SPECS §6/§7).
+// ===========================================================================
+
+const HIGHLIGHT_BG: Record<HighlightColor, string> = {
+  yellow: "#ffe97a",
+  green: "#b6f0b6",
+  blue: "#a9d4ff",
+  pink: "#ffc4de",
+};
+
+const IGNORED_TAGS = new Set(["script", "style", "rt", "rp", "template"]);
+
+/** First text node under `root` in document order, skipping ignored tags. */
+function firstTextNode(root: Node | null): Text | null {
+  if (!root) return null;
+  if (root.nodeType === Node.TEXT_NODE) {
+    const t = root as Text;
+    return t.data === "" ? null : t;
+  }
+  if (root.nodeType !== Node.ELEMENT_NODE) return null;
+  const e = root as HTMLElement;
+  if (IGNORED_TAGS.has(e.tagName.toLowerCase()) || e.hasAttribute("data-rdr-ignore")) return null;
+  for (let i = 0; i < e.childNodes.length; i++) {
+    const t = firstTextNode(e.childNodes[i]!);
+    if (t) return t;
+  }
+  return null;
+}
+
+/** Last text node under `root` in document order, skipping ignored tags. */
+function lastTextNode(root: Node | null): Text | null {
+  if (!root) return null;
+  if (root.nodeType === Node.TEXT_NODE) {
+    const t = root as Text;
+    return t.data === "" ? null : t;
+  }
+  const e = root as HTMLElement;
+  if (IGNORED_TAGS.has(e.tagName.toLowerCase()) || e.hasAttribute("data-rdr-ignore")) return null;
+  for (let i = e.childNodes.length - 1; i >= 0; i--) {
+    const t = lastTextNode(e.childNodes[i]!);
+    if (t) return t;
+  }
+  return null;
+}
+
+/**
+ * A DOM point (range anchor) → canonical text offset via the shared map.
+ * A point inside a text node at offset k sits just BEFORE character k; when
+ * it sits at the END of the node (k == len) it is one canonical char past the
+ * node's last character — `toCanonical` only knows the last char's position,
+ * so add +1 in that case. For element containers the start point maps to the
+ * first character inside, the end point to one past the last.
+ */
+function pointToCanonical(
+  container: Node,
+  offset: number,
+  isEnd: boolean,
+  map: CanonicalMap,
+): number | null {
+  let node: Text | null = null;
+  let off = 0;
+  let atNodeEnd = false;
+  if (container.nodeType === Node.TEXT_NODE) {
+    node = container as Text;
+    off = offset;
+    atNodeEnd = off >= node.data.length;
+  } else {
+    const target = isEnd ? container.childNodes[offset - 1] ?? null : container.childNodes[offset] ?? null;
+    node = isEnd ? lastTextNode(target) : firstTextNode(target);
+    off = isEnd && node ? node.data.length : 0;
+    atNodeEnd = isEnd;
+  }
+  if (!node) return null;
+  let c = map.toCanonical(node as unknown as { nodeType: 3; nodeName: string; data: string }, off);
+  if (atNodeEnd) c += 1;
+  return c;
+}
+
+interface PlacedRange {
+  hlId: string;
+  color: HighlightColor | null;
+  note: string | null;
+  start: number;
+  end: number;
+}
+
+/** Remove hl-marks previously placed by this module (unwrap, keep text). */
+function clearMarks(root: HTMLElement): void {
+  const marks = root.querySelectorAll("mark[data-testid='hl-mark']");
+  marks.forEach((m) => {
+    while (m.firstChild) m.parentNode!.insertBefore(m.firstChild, m);
+    m.remove();
+  });
+  root.normalize();
+}
+
+/**
+ * The text-node segment containing canonical offset `off`: the node whose
+ * canonical span brackets off, with the local offset for a DOM Range
+ * boundary. (node, off) is the position just BEFORE the character that
+ * starts at `off` — exactly what Range.setStart/setEnd want. When `off`
+ * falls on an unmapped block separator, snap to the nearest mapped
+ * character (the shared `toNode` does the same), which is visually a
+ * no-op — separators sit between blocks.
+ */
+function pointAtCanonical(root: HTMLElement, off: number, map: CanonicalMap): { node: Text; offset: number } {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const segs: { node: Text; s: number; e: number }[] = [];
+  let cur: Text | null;
+  while ((cur = walker.nextNode() as Text | null)) {
+    const c = cur as unknown as { nodeType: 3; nodeName: string; data: string };
+    segs.push({ node: cur, s: map.toCanonical(c, 0), e: map.toCanonical(c, cur.data.length) + 1 });
+  }
+  for (const sg of segs) if (off >= sg.s && off < sg.e) return { node: sg.node, offset: off - sg.s };
+  // Off on a separator: prefer the node BEFORE it (a selection that ends
+  // just after a separator then ends at the previous node's end — correct).
+  // Forward-snap only when there is nothing before (separator at offset 0
+  // of a selection's start). Mirrors the shared toNode's walk-out order.
+  let prev: (typeof segs)[number] | null = null;
+  for (const sg of segs) {
+    if (sg.e <= off) prev = sg;
+    else break;
+  }
+  if (prev) return { node: prev.node, offset: prev.e - prev.s };
+  for (const sg of segs) if (sg.s > off) return { node: sg.node, offset: 0 };
+  // No mapped text at all (should not happen for a rendered section).
+  throw new Error("pointAtCanonical: no mapped text in document");
+}
+
+/**
+ * Draw each resolved canonical [start, end) range as
+ * `<mark data-testid="hl-mark">` runs. A range may span block boundaries
+ * (cross-paragraph highlight), so it is split at the text nodes it covers
+ * and each covered slice is wrapped in its own <mark>. Splitting text
+ * nodes first keeps every mark's range inside a single text node, so
+ * `surroundContents` succeeds and block structure (separate <p>s) is
+ * preserved. Marks share the same hlId — consumers query by id.
+ */
+function placeRanges(root: HTMLElement, map: CanonicalMap, ranges: PlacedRange[]): void {
+  for (const r of ranges) {
+    const s = pointAtCanonical(root, r.start, map);
+    // End point: r.end is exclusive (one past the last covered char), so map
+    // it directly — pointAtCanonical's separator-snap lands an out-of-range
+    // end at the previous node's END, exactly the position we need.
+    const e = pointAtCanonical(root, r.end, map);
+    // Covered text nodes in document order between start and end points.
+    const covered: { node: Text; from: number; to: number }[] = [];
+    {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      let n: Node | null = null;
+      let seenStart = false;
+      while ((n = walker.nextNode())) {
+        const t = n as Text;
+        if (t === s.node) {
+          covered.push({ node: t, from: s.offset, to: t.data.length });
+          seenStart = true;
+          if (t === e.node) covered[covered.length - 1]!.to = e.offset;
+          continue;
+        }
+        if (!seenStart) continue;
+        if (t === e.node) {
+          covered.push({ node: t, from: 0, to: e.offset });
+          break;
+        }
+        covered.push({ node: t, from: 0, to: t.data.length });
+      }
+    }
+    for (const c of covered) {
+      if (c.to - c.from <= 0) continue;
+      const node = c.node;
+      if (c.from > 0) node.splitText(c.from);
+      const slice = node === c.node ? node : (node.nextSibling as Text);
+      if (c.to < slice.data.length) slice.splitText(c.to - c.from);
+      const range = document.createRange();
+      range.setStart(slice, 0);
+      range.setEnd(slice, slice.data.length);
+      const mark = document.createElement("mark");
+      mark.setAttribute("data-testid", "hl-mark");
+      mark.setAttribute("data-highlight-id", r.hlId);
+      mark.style.background = HIGHLIGHT_BG[r.color ?? "yellow"];
+      mark.style.borderRadius = "2px";
+      if (r.note) mark.setAttribute("title", r.note);
+      range.surroundContents(mark);
+    }
+  }
 }
 
 function ErrorBox({ message, onBack }: { message: string; onBack: () => void }) {

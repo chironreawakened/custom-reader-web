@@ -1,6 +1,6 @@
 import { pgSchema } from "drizzle-orm/pg-core";
 import { customType, index, integer, jsonb, primaryKey, text, timestamp, uniqueIndex, uuid, varchar } from "drizzle-orm/pg-core";
-import type { Locator, ReaderPrefs } from "@reader/shared";
+import type { Locator, ReaderPrefs, ReflowAnchor } from "@reader/shared";
 
 /** tsvector column (SPECS §9: only the tsvector of section text is stored). */
 export const tsvector = customType<{ data: string }>({
@@ -189,8 +189,37 @@ export const userSettings = app.table("user_settings", {
   readerPrefs: jsonb("reader_prefs").$type<ReaderPrefs>(),
 });
 
+// --- slice 4: highlights (SPECS §7, §11) ---
+
+/** Highlights. Delete is soft (`deleted_at`) — SPECS §12. The anchor is a
+ *  ReflowAnchor (SPECS §7) stored as jsonb. */
+export const highlights = app.table(
+  "highlights",
+  {
+    id: uuid("id").primaryKey(),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    documentId: uuid("document_id").notNull().references(() => documents.id, { onDelete: "cascade" }),
+    /** SPECS §7 anchor (reflow/pdf), stored as jsonb. */
+    anchor: jsonb("anchor").$type<ReflowAnchor>().notNull(),
+    /** Canonical text of the selection (SPECS §7 `exact`). */
+    exact: text("exact").notNull(),
+    color: text("color").$type<"yellow" | "green" | "blue" | "pink">(),
+    note: text("note"),
+    /** tsvector of `exact` (SPECS §9). */
+    searchVector: tsvector("search_vector"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Soft delete (SPECS §12). */
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("highlights_user_document_idx").on(t.userId, t.documentId),
+    index("highlights_search_idx").using("gin", t.searchVector),
+  ],
+);
+
 // --- remaining tables (SPECS §11), added in the slices that use them ---
-// tags, document_tags, highlights, tts_cache  ->  their slices.
+// tags, document_tags, tts_cache  ->  their slices.
 
 export type User = typeof users.$inferSelect;
 export type StorageObject = typeof storageObjects.$inferSelect;
@@ -203,3 +232,4 @@ export type Asset = typeof assets.$inferSelect;
 export type Backup = typeof backups.$inferSelect;
 export type ReadingProgress = typeof readingProgress.$inferSelect;
 export type UserSettings = typeof userSettings.$inferSelect;
+export type Highlight = typeof highlights.$inferSelect;

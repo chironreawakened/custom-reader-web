@@ -4,7 +4,11 @@ import type {
   GetDocumentResponse,
   GetSettingsResponse,
   ListDocumentsResponse,
+  ListHighlightsResponse,
+  HighlightItem,
   MeResponse,
+  PatchHighlightBody,
+  PostHighlightBody,
   ProgressResponse,
   PutProgressBody,
   PutSettingsBody,
@@ -102,6 +106,32 @@ export const api = {
       headers: { ...headers, "content-type": "application/json" },
       body: JSON.stringify(body),
     }).then((r) => unwrap<GetSettingsResponse>(r));
+  },
+
+  // ---- highlights (slice 4) ------------------------------------------------
+  listHighlights(docId: string): Promise<ListHighlightsResponse> {
+    return fetch(`/v1/highlights?documentId=${docId}`, { headers }).then((r) => unwrap<ListHighlightsResponse>(r));
+  },
+  createHighlight(body: PostHighlightBody): Promise<HighlightItem> {
+    return fetch("/v1/highlights", {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }).then((r) => unwrap<HighlightItem>(r));
+  },
+  patchHighlight(id: string, body: PatchHighlightBody): Promise<HighlightItem> {
+    return fetch(`/v1/highlights/${id}`, {
+      method: "PATCH",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }).then((r) => unwrap<HighlightItem>(r));
+  },
+  deleteHighlight(id: string): Promise<void> {
+    return fetch(`/v1/highlights/${id}`, { method: "DELETE", headers }).then((r) => unwrap<void>(r));
+  },
+  /** Same-origin download link — the cookie carries the session. */
+  exportHighlightsUrl(docId: string): string {
+    return `/v1/export/highlights.md?documentId=${docId}`;
   },
 };
 
