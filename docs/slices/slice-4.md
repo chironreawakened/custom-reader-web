@@ -146,6 +146,31 @@ content — a 62,778-char section with a 109-char anchor:
   final commit. No data loss: the one test highlight row created during
   the incident was soft-deleted.
 
+## Post-deploy incident 2: single-paragraph highlight over-marks (owner-reported, fixed in `main`)
+
+Reported by the owner on first manual use: highlighting a phrase inside
+one paragraph worked for the phrase itself, but **everything after that
+paragraph was highlighted too — the rest of the chapter**.
+
+- **Root cause:** `placeRanges` (web, `apps/web/src/main.tsx`) walked
+  text nodes from the range start to the end and, when start and end
+  landed in the **same** text node, `continue`d instead of stopping —
+  wrapping every remaining text node in the section in a `<mark>`.
+  A second variant: a range ending mid-node still marked the rest of
+  that node.
+- **Why e2e missed it:** the only in-e2e highlight was deliberately
+  cross-paragraph (start and end in different nodes) — the one path that
+  broke out correctly. The most common case (single paragraph) was never
+  exercised.
+- **Fix:** rewrote the walk to compute each node's canonical span and
+  wrap only the slice of each node that overlaps `[start, end)` —
+  boundaries mid-paragraph now stop the mark exactly.
+- **Regression test:** e2e (`progress.spec.ts`) adds a single-paragraph,
+  mid-paragraph highlight ("foxes jump over lazy dogs") and asserts
+  exactly one `<mark>` with exactly that text, nothing in the other
+  paragraph, the unmarked tail stays plain, and the bounds persist
+  across a reload.
+
 ## Known gaps / follow-ups
 
 - Highlight editing is colour/note only — the range itself can't be

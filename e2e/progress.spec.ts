@@ -186,4 +186,57 @@ test("progress + prefs: saved section and theme survive a reload", async ({ page
   await item.getByTestId("delete-highlight-btn").click();
   await expect(panel.getByTestId("highlight-item")).toHaveCount(0, { timeout: 15_000 });
   await expect(section3.locator("mark[data-testid='hl-mark']")).toHaveCount(0);
+
+  // ---- Regression: a single-paragraph, mid-paragraph highlight must not
+  // mark the rest of the section. Select "foxes jump over lazy dogs" — inside
+  // the second <p>, starting and ending mid-node. Before the fix this left a
+  // <mark> on the phrase but ALSO wrapped every following text node, so the
+  // rest of the chapter rendered highlighted.
+  await section3.evaluate(() => {
+    const article = document.querySelector("[data-testid='section']")!;
+    const nodes: Text[] = [];
+    const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
+    let n: Node | null;
+    while ((n = walker.nextNode())) nodes.push(n as Text);
+    let found: { node: Text; offset: number } | null = null;
+    for (const node of nodes) {
+      const i = node.data.indexOf("foxes jump over lazy dogs");
+      if (i !== -1) { found = { node, offset: i }; break; }
+    }
+    if (!found) throw new Error("single-para phrase not found");
+    const range = document.createRange();
+    range.setStart(found.node, found.offset);
+    range.setEnd(found.node, found.offset + "foxes jump over lazy dogs".length);
+    const sel = window.getSelection()!;
+    sel.removeAllRanges();
+    sel.addRange(range);
+    document.querySelector("#content")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  });
+
+  const bar2 = page.getByTestId("save-highlight-bar");
+  await expect(bar2).toBeVisible();
+  await bar2.getByTestId("save-highlight-btn").click();
+
+  // Exactly ONE mark, in the SECOND paragraph only, covering exactly the
+  // selected phrase — nothing before or after it, and nothing in <p> one.
+  const marks2 = section3.locator("mark[data-testid='hl-mark']");
+  await expect(marks2, { timeout: 15_000 }).toHaveCount(1);
+  await expect(marks2.first()).toHaveText("foxes jump over lazy dogs");
+  await expect(section3.locator("p").nth(0).locator("mark[data-testid='hl-mark']")).toHaveCount(0);
+  await expect(section3.locator("p").nth(1).locator("mark[data-testid='hl-mark']")).toHaveCount(1);
+  // The unmarked tail of the paragraph is still plain text (not in a <mark>).
+  await expect(section3.locator("p").nth(1)).toContainText("at night.");
+  const markedInP2 = await section3.locator("p").nth(1).locator("mark[data-testid='hl-mark']").allTextContents();
+  expect(markedInP2.join(" ")).not.toContain("at night.");
+
+  // Persists correctly across a reload too (anchor re-render, same bounds).
+  await page.reload();
+  await expect(page.getByTestId("signed-in")).toBeVisible({ timeout: 10_000 });
+  const row5 = page.getByTestId("doc-row").filter({ hasText: "Night Fixture Book" }).first();
+  await row5.click();
+  await expect(page.getByTestId("reader")).toBeVisible();
+  const section5 = page.getByTestId("section");
+  await expect(section5).toContainText("first chapter begins here", { timeout: 15_000 });
+  await expect(section5.locator("mark[data-testid='hl-mark']"), { timeout: 15_000 }).toHaveCount(1);
+  await expect(section5.locator("mark[data-testid='hl-mark']").first()).toHaveText("foxes jump over lazy dogs");
 });

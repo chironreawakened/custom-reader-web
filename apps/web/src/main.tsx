@@ -990,47 +990,59 @@ function pointAtCanonical(root: HTMLElement, off: number, map: CanonicalMap): { 
  * `surroundContents` succeeds and block structure (separate <p>s) is
  * preserved. Marks share the same hlId — consumers query by id.
  */
+function splitAt(node: Text, off: number): Text {
+  return off > 0 && off < node.data.length ? node.splitText(off) : node;
+}
+
 function placeRanges(root: HTMLElement, map: CanonicalMap, ranges: PlacedRange[]): void {
-  for (const r of ranges) {
-    const s = pointAtCanonical(root, r.start, map);
-    // End point: r.end is exclusive (one past the last covered char), so map
-    // it directly — pointAtCanonical's separator-snap lands an out-of-range
-    // end at the previous node's END, exactly the position we need.
-    const e = pointAtCanonical(root, r.end, map);
-    // Covered text nodes in document order between start and end points.
-    const covered: { node: Text; from: number; to: number }[] = [];
-    {
-      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-      let n: Node | null = null;
-      let seenStart = false;
-      while ((n = walker.nextNode())) {
-        const t = n as Text;
-        if (t === s.node) {
-          covered.push({ node: t, from: s.offset, to: t.data.length });
-          seenStart = true;
-          if (t === e.node) covered[covered.length - 1]!.to = e.offset;
-          continue;
-        }
-        if (!seenStart) continue;
-        if (t === e.node) {
-          covered.push({ node: t, from: 0, to: e.offset });
-          break;
-        }
-        covered.push({ node: t, from: 0, to: t.data.length });
-      }
+  // Canonical span of every text node. Two consecutive nodes can share a
+  // boundary offset when a block separator sits between them; the overlap is
+  // harmless because a range boundary at that offset marks nothing extra.
+  const segs = (() => {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const out: { node: Text; s: number; e: number }[] = [];
+    let cur: Node | null;
+    while ((cur = walker.nextNode())) {
+      const c = cur as unknown as { nodeType: 3; nodeName: string; data: string };
+      out.push({ node: cur as Text, s: map.toCanonical(c, 0), e: map.toCanonical(c, c.data.length) + 1 });
     }
-    for (const c of covered) {
-      if (c.to - c.from <= 0) continue;
-      // Carve out the covered slice [from, to) within this single text node,
-      // then wrap it in a <mark>. splitText(from) leaves `node` as the
-      // [0,from) prefix and returns the [from,len) remainder — work on that.
-      let node = c.node;
-      let to = c.to;
-      if (c.from > 0) {
-        node = node.splitText(c.from);
-        to -= c.from; // rebase onto the remainder's local coordinates
+    return out;
+  })();
+  // (canonical offset → the node whose segment brackets it) for the range
+  // boundaries — pointAtCanonical does the separator snapping.
+  const at = (off: number) => pointAtCanonical(root, off, map);
+
+  for (const r of ranges) {
+    const s = at(r.start);
+    const e = at(r.end);
+    // Walk the text nodes in document order; wrap each slice of each node
+    // that overlaps [r.start, r.end) in a <mark>. Decisions are made from
+    // each node's canonical span — never "everything from here on" — so a
+    // boundary mid-paragraph stops the mark there instead of swallowing the
+    // rest of the chapter (regression found in live use, 2026-11-02).
+    const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let n: Node | null;
+    let seenStart = false;
+    while ((n = w.nextNode())) {
+      const t = n as Text;
+      const seg = segs.find((x) => x.node === t);
+      if (!seg) continue;
+      if (seg.e <= r.start) continue; // ends before (or at) the range start
+      if (!seenStart) {
+        if (t !== s.node) continue; // not yet reached the start node
+        seenStart = true;
       }
-      if (to < node.data.length) node.splitText(to); // drop the [to,len) tail
+      if (seg.s >= r.end) break; // range is over
+      // Overlap of this node with the range, in the node's own coordinates.
+      const from = t === s.node ? s.offset : Math.max(0, r.start - seg.s);
+      const to = t === e.node ? e.offset : Math.min(t.data.length, r.end - seg.s);
+      if (to - from <= 0) continue;
+      // Carve the covered slice out of the node: split off the unmarked
+      // prefix and tail, then wrap the remainder in a <mark>. splitText
+      // only touches leaf text nodes, so the walker's path is undisturbed.
+      let node = t;
+      if (from > 0) node = splitAt(node, from);
+      if (to - from < node.data.length) splitAt(node, to - from);
       const range = document.createRange();
       range.setStart(node, 0);
       range.setEnd(node, node.data.length);
