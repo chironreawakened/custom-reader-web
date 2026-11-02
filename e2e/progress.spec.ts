@@ -79,19 +79,16 @@ test("progress + prefs: saved section and theme survive a reload", async ({ page
   // real bubbling mouseup, so the app's own selection→anchor path runs.
   await section.evaluate(() => {
     const article = document.querySelector("[data-testid='section']")!;
-    const nodes: { node: Text; start: number }[] = [];
+    const nodes: { node: Text }[] = [];
     const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
-    let acc = 0;
     let n: Node | null;
     while ((n = walker.nextNode())) {
-      const t = n as Text;
-      nodes.push({ node: t, start: acc });
-      acc += t.data.length;
+      nodes.push({ node: n as Text });
     }
     const find = (s: string) => {
-      for (const { node, start } of nodes) {
+      for (const { node } of nodes) {
         const i = node.data.indexOf(s);
-        if (i !== -1) return { node, offset: start + i };
+        if (i !== -1) return { node, offset: i };
       }
       throw new Error(`text not found: ${s}`);
     };
