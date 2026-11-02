@@ -259,6 +259,39 @@ describe("GET /v1/highlights", () => {
     expect(body.items[0]!.sectionId).toBe(SECTION_GONE);
   });
 
+  it("does not 500 on a long (>32-char) orphaned anchor — the BITAP fuzzy crash (prod incident)", async () => {
+    // Regression: resolveAnchor's fuzzy step called diff-match-patch's
+    // match_bitap_, which THROWS for patterns longer than Match_MaxBits (32).
+    // A long highlight whose anchor misses the literal ladder used to 500 the
+    // whole list (and crash the web reader's placeRanges). It must return 200
+    // with the item flagged orphaned instead.
+    const longExact = "keeper walked the spiral stairs into the fog and never came back down";
+    const app = await buildApp();
+    reset(
+      [highlights, [hlRow({ anchor: { kind: "reflow", v: 1, sectionId: SECTION_1, exact: longExact, prefix: "", suffix: "", offsetHint: 0, canonicalTextVersion: 1 }, exact: longExact })]],
+      [sections, [{ id: SECTION_1, title: "Chapter One", htmlObjectId: SECTION_1, documentId: DOC_A, userId: USER_ID }]],
+    );
+    const res = await app.inject({ method: "GET", url: "/v1/highlights", cookies: cookie });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { items: { orphaned: boolean }[]; total: number };
+    expect(body.total).toBe(1);
+    expect(body.items[0]!.orphaned).toBe(true);
+  });
+
+  it("export: a long orphaned anchor renders, not 500", async () => {
+    const longExact = "keeper walked the spiral stairs into the fog and never came back down";
+    const app = await buildApp();
+    reset(
+      [highlights, [hlRow({ anchor: { kind: "reflow", v: 1, sectionId: SECTION_1, exact: longExact, prefix: "", suffix: "", offsetHint: 0, canonicalTextVersion: 1 }, exact: longExact })]],
+      [sections, [{ id: SECTION_1, title: "Chapter One", htmlObjectId: SECTION_1, documentId: DOC_A, userId: USER_ID }]],
+      [documents, [{ id: DOC_A, title: "The Lighthouse", userId: USER_ID }]],
+    );
+    const res = await app.inject({ method: "GET", url: "/v1/export/highlights.md", cookies: cookie });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toContain("markdown");
+    expect(res.body).toContain("(orphaned)");
+  });
+
   it("filters by documentId", async () => {
     reset(
       [highlights, [

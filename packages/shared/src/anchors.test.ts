@@ -151,6 +151,32 @@ describe("anchors (SPECS §7)", () => {
     expect(res).toEqual({ status: "orphaned" });
   });
 
+  it("no crash: long anchor (>32 chars, the BITAP cap) degrades to orphaned", () => {
+    // Regression: diff-match-patch's match_bitap_ THROWS for patterns longer
+    // than Match_MaxBits (32). A long highlight that misses steps 1–2 used to
+    // 500 the whole request (prod incident, 2026-11-02: a 109-char anchor
+    // with a 1-char difference fell to the fuzzy step). It must resolve to
+    // orphaned instead — shown in the list, never dropped.
+    const LONG = "The odds change as our position in the cycles changes. If we do not change our investment stance";
+    const a: ReflowAnchor = {
+      kind: "reflow", v: 1, sectionId: SID,
+      exact: LONG, prefix: "", suffix: "",
+      offsetHint: 0, canonicalTextVersion: 1,
+    };
+    expect(() => resolveAnchor(a, FIX)).not.toThrow();
+    expect(resolveAnchor(a, FIX)).toEqual({ status: "orphaned" });
+  });
+
+  it("no crash: long anchor found on the literal ladder still resolves", () => {
+    // >32-char exact that IS present, with context: step 1/2 resolve it,
+    // fuzzy step is skipped, no throw.
+    const LONG = "The fog had not lifted in three days and the lamp was his only clock";
+    const pos = FIX.indexOf(LONG);
+    const a = buildReflowAnchor(SID, { start: pos, end: pos + LONG.length }, FIX);
+    const res = resolveAnchor(a, FIX);
+    expect(res).toEqual({ status: "resolved", start: pos, end: pos + LONG.length });
+  });
+
   it("orphaned: no literal match and nothing fuzzy either — never a false positive", () => {
     const a: ReflowAnchor = {
       kind: "reflow", v: 1, sectionId: SID,

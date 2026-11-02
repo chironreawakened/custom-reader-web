@@ -154,6 +154,12 @@ export type AnchorResolution =
 
 /** diff-match-patch fuzzy threshold (SPECS §7.3). */
 export const FUZZY_THRESHOLD = 0.3;
+/**
+ * diff-match-patch's BITAP pattern cap (its default `Match_MaxBits`):
+ * `match_bitap_` THROWS for patterns longer than this. Longer anchors skip
+ * the fuzzy step and degrade to steps 1–2 or orphaned instead of crashing.
+ */
+export const FUZZY_MAX_PATTERN = 32;
 /** Fuzzy match_max: how much search text per step of target text. */
 const FUZZY_MATCH_MAX = 500;
 /** Progressive fuzzy windows around the hint (chars), final = whole text. */
@@ -221,6 +227,11 @@ function fuzzy(): DiffMatchPatch {
  * offset or -1.
  */
 function fuzzyFind(text: string, anchor: ReflowAnchor): number {
+  // diff-match-patch's match_bitap_ throws 'Pattern too long for this
+  // browser.' when the pattern exceeds its Match_MaxBits (32). Long highlights
+  // therefore never reach the fuzzy step — they degrade to the literal
+  // ladder (steps 1–2) or orphaned, which is the safe direction (SPECS §7.4).
+  if (anchor.exact.length > FUZZY_MAX_PATTERN) return -1;
   if (anchor.exact.length > text.length) return -1;
   const d = fuzzy();
   const hint = Math.max(0, Math.min(anchor.offsetHint, text.length));
