@@ -165,4 +165,6 @@ The carve-out now uses the returned remainder and rebases `to` onto its
 local coordinates. Visible symptom: CI asserted the first mark's text
 and got `The ` instead of the covered paragraph text.
 
-**Final state:** *(fill in once the run is green: run id, e2e N/N.)*
+**Final state:** CI run 41407690578 (commit `9a7719d`) fully green —
+test ✓, images ✓, e2e ✓ (4/4 in 17.9 s, incl. the cross-paragraph
+highlight flow).
