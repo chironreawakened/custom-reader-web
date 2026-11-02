@@ -1021,13 +1021,19 @@ function placeRanges(root: HTMLElement, map: CanonicalMap, ranges: PlacedRange[]
     }
     for (const c of covered) {
       if (c.to - c.from <= 0) continue;
-      const node = c.node;
-      if (c.from > 0) node.splitText(c.from);
-      const slice = node === c.node ? node : (node.nextSibling as Text);
-      if (c.to < slice.data.length) slice.splitText(c.to - c.from);
+      // Carve out the covered slice [from, to) within this single text node,
+      // then wrap it in a <mark>. splitText(from) leaves `node` as the
+      // [0,from) prefix and returns the [from,len) remainder — work on that.
+      let node = c.node;
+      let to = c.to;
+      if (c.from > 0) {
+        node = node.splitText(c.from);
+        to -= c.from; // rebase onto the remainder's local coordinates
+      }
+      if (to < node.data.length) node.splitText(to); // drop the [to,len) tail
       const range = document.createRange();
-      range.setStart(slice, 0);
-      range.setEnd(slice, slice.data.length);
+      range.setStart(node, 0);
+      range.setEnd(node, node.data.length);
       const mark = document.createElement("mark");
       mark.setAttribute("data-testid", "hl-mark");
       mark.setAttribute("data-highlight-id", r.hlId);

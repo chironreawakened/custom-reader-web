@@ -109,6 +109,7 @@ test("progress + prefs: saved section and theme survive a reload", async ({ page
   await expect(bar).toBeVisible();
   await expect(page.getByTestId("save-highlight-preview")).toContainText("first chapter begins here");
   await expect(page.getByTestId("save-highlight-preview")).toContainText("Second para");
+  await expect(page.getByTestId("save-highlight-preview")).not.toContainText("The first");
 
   // Save it.
   await page.getByTestId("save-highlight-btn").click();
@@ -118,6 +119,8 @@ test("progress + prefs: saved section and theme survive a reload", async ({ page
   const marks = section.locator("mark[data-testid='hl-mark']");
   await expect(marks.first()).toBeVisible();
   await expect(section.locator("p mark[data-testid='hl-mark']")).toHaveCount(2, { timeout: 15_000 });
+  // The selection starts at "first" (not at the paragraph start), so the
+  // first mark covers the paragraph from "first" to its end.
   await expect(section.locator("p").nth(0).locator("mark[data-testid='hl-mark']")).toHaveText(
     "first chapter begins here. It has some words for the word count.",
   );

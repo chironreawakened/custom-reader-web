@@ -146,5 +146,23 @@ highlights panel, and export all highlights of a book as Markdown.
 
 ## CI e2e notes
 
-*(root cause + fix for any first-push e2e failure, in the slice-3
-style — fill in if the first CI run is red.)*
+The first two pushes each failed the CI **e2e** job (test + images were
+green both times); both were real bugs the unit gates cannot see:
+
+**Fix 1 — e2e spec, `Range` offsets must be node-relative (commit
+`0c58737`).** The spec's text-selection helper returned a cumulative
+offset across all text nodes (`start + i`), but `Range.setStart`/`setEnd`
+take an offset **relative to the given node** — `setEnd` threw
+`IndexSizeError: offset 141 > node length 53`. The helper now returns
+the in-node `indexOf` result.
+
+**Fix 2 — web `placeRanges`, wrong slice wrapped (commit 3).** After
+`node.splitText(from)`, the code wrapped `node` itself — but `splitText`
+**mutates** `node` in place to the `[0, from)` prefix and **returns the
+remainder**. The wrapped slice was therefore the prefix before the
+highlight (`"The "`), and the actual covered text was left unmarked.
+The carve-out now uses the returned remainder and rebases `to` onto its
+local coordinates. Visible symptom: CI asserted the first mark's text
+and got `The ` instead of the covered paragraph text.
+
+**Final state:** *(fill in once the run is green: run id, e2e N/N.)*
