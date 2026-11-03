@@ -7,9 +7,14 @@ import pgBoss from "pg-boss";
 import type { AppConfig } from "../config.js";
 
 export const JOB_EPUB_PROCESS = "epub.process";
+export const JOB_ARTICLE_PROCESS = "article.process";
 export const JOB_BACKUP_NIGHTLY = "backup.nightly";
 
 export interface EpubProcessJob {
+  documentId: string;
+}
+
+export interface ArticleProcessJob {
   documentId: string;
 }
 

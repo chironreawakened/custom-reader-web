@@ -7,6 +7,7 @@ import type {
   ListHighlightsResponse,
   HighlightItem,
   MeResponse,
+  PatchDocumentBody,
   PatchHighlightBody,
   PostHighlightBody,
   ProgressResponse,
@@ -15,6 +16,10 @@ import type {
   SectionResponse,
   TocResponse,
   ListSectionsResponse,
+  ListTagsResponse,
+  PatchDocumentResponse,
+  PostUrlResponse,
+  TagItem,
 } from "@reader/shared";
 
 /** Thin fetch client for the /v1 API. Same-origin; cookies carry the session. */
@@ -67,8 +72,9 @@ export const api = {
   },
 
   // ---- documents (slice 2) -------------------------------------------------
-  listDocuments(): Promise<ListDocumentsResponse> {
-    return fetch("/v1/documents", { headers }).then((r) => unwrap<ListDocumentsResponse>(r));
+  listDocuments(tag?: string): Promise<ListDocumentsResponse> {
+    const q = tag ? `?tag=${encodeURIComponent(tag)}` : "";
+    return fetch(`/v1/documents${q}`, { headers }).then((r) => unwrap<ListDocumentsResponse>(r));
   },
   getDocument(id: string): Promise<GetDocumentResponse> {
     return fetch(`/v1/documents/${id}`, { headers }).then((r) => unwrap<GetDocumentResponse>(r));
@@ -84,6 +90,41 @@ export const api = {
   },
   upload(file: File): Promise<{ id: string; title: string; ingestState: string }> {
     return uploadFile(file);
+  },
+  /** Slice 5: fetch + ingest an article (async — the document starts pending). */
+  addUrl(url: string): Promise<PostUrlResponse> {
+    return fetch("/v1/documents/url", {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ url }),
+    }).then((r) => unwrap<PostUrlResponse>(r));
+  },
+  /** Slice 5: partial update — omit = unchanged, null = clear; tagIds is a
+   *  full replacement set. */
+  patchDocument(id: string, body: PatchDocumentBody): Promise<PatchDocumentResponse> {
+    return fetch(`/v1/documents/${id}`, {
+      method: "PATCH",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }).then((r) => unwrap<PatchDocumentResponse>(r));
+  },
+  deleteDocument(id: string): Promise<void> {
+    return fetch(`/v1/documents/${id}`, { method: "DELETE", headers }).then((r) => unwrap<void>(r));
+  },
+  // ---- tags (slice 5) -------------------------------------------------------
+  listTags(): Promise<ListTagsResponse> {
+    return fetch("/v1/tags", { headers }).then((r) => unwrap<ListTagsResponse>(r));
+  },
+  /** Idempotent: an existing tag (case-insensitive) is returned as-is. */
+  createTag(name: string): Promise<TagItem> {
+    return fetch("/v1/tags", {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ name }),
+    }).then((r) => unwrap<TagItem>(r));
+  },
+  deleteTag(id: string): Promise<void> {
+    return fetch(`/v1/tags/${id}`, { method: "DELETE", headers }).then((r) => unwrap<void>(r));
   },
 
   // ---- progress + settings (slice 3) ---------------------------------------

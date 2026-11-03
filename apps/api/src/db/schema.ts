@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { pgSchema } from "drizzle-orm/pg-core";
 import { customType, index, integer, jsonb, primaryKey, text, timestamp, uniqueIndex, uuid, varchar } from "drizzle-orm/pg-core";
 import type { Locator, ReaderPrefs, ReflowAnchor } from "@reader/shared";
@@ -218,8 +219,31 @@ export const highlights = app.table(
   ],
 );
 
+// --- slice 5: tags (SPECS §11) ---
+
+export const tags = app.table(
+  "tags",
+  {
+    id: uuid("id").primaryKey(),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    /** Display form (trimmed, case preserved); uniqueness is on lower(name). */
+    name: text("name").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("tags_user_name_unique").on(t.userId, sql`lower(${t.name})`)],
+);
+
+export const documentTags = app.table(
+  "document_tags",
+  {
+    documentId: uuid("document_id").notNull().references(() => documents.id, { onDelete: "cascade" }),
+    tagId: uuid("tag_id").notNull().references(() => tags.id, { onDelete: "cascade" }),
+  },
+  (t) => [primaryKey({ columns: [t.documentId, t.tagId] })],
+);
+
 // --- remaining tables (SPECS §11), added in the slices that use them ---
-// tags, document_tags, tts_cache  ->  their slices.
+// tts_cache -> its slice.
 
 export type User = typeof users.$inferSelect;
 export type StorageObject = typeof storageObjects.$inferSelect;
@@ -233,3 +257,5 @@ export type Backup = typeof backups.$inferSelect;
 export type ReadingProgress = typeof readingProgress.$inferSelect;
 export type UserSettings = typeof userSettings.$inferSelect;
 export type Highlight = typeof highlights.$inferSelect;
+export type Tag = typeof tags.$inferSelect;
+export type DocumentTag = typeof documentTags.$inferSelect;

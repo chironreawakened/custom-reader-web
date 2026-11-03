@@ -20,7 +20,10 @@ import { assets, backups, documents, sections, users, tocEntries } from "./db/sc
 import { createS3Storage } from "./storage/s3.js";
 import { createObjectStore } from "./storage/object-store.js";
 import { EpubError, PARSER_VERSION, parseEpub } from "./services/epub/parse-epub.js";
-import { JOB_BACKUP_NIGHTLY, JOB_EPUB_PROCESS, type EpubProcessJob } from "./jobs/boss.js";
+import { ARTICLE_PARSER_VERSION, ArticleError, extractArticle } from "./services/article/extract.js";
+import { safeFetch, SsrfError } from "./services/ssrf/safe-fetch.js";
+import { imageSize, mimeByPath } from "./services/epub/image-size.js";
+import { JOB_ARTICLE_PROCESS, JOB_BACKUP_NIGHTLY, JOB_EPUB_PROCESS, type ArticleProcessJob, type EpubProcessJob } from "./jobs/boss.js";
 import { backupKindFor } from "./jobs/backup-schedule.js";
 
 const pExecFile = promisify(execFile);
@@ -181,6 +184,138 @@ async function markFailed(docId: string, error: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// article.process (slice 5: URL articles)
+// ---------------------------------------------------------------------------
+
+/** Hard cap on one re-hosted image (the section html already survived a 5 MB
+ *  document cap; images live in their own objects). */
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_HTML_BYTES = 5 * 1024 * 1024;
+const FETCH_TIMEOUT_MS = 30_000;
+
+/** The ci / local-verify stacks host the article fixture on loopback; prod
+ *  must never reach it (safe-fetch vetoes loopback there). */
+const ALLOW_LOOPBACK = cfg.env === "ci";
+
+async function processArticle(docId: string): Promise<void> {
+  const doc = await claimDocument(docId);
+  if (!doc) {
+    // eslint-disable-next-line no-console
+    console.log(`[worker] ${docId}: nothing to do (already processed or gone)`);
+    return;
+  }
+  if (!doc.sourceUrl) {
+    await markFailed(docId, "article source URL is missing");
+    return;
+  }
+
+  // 1. Fetch the page (SSRF-vetted, redirects re-vetted per hop).
+  let htmlText: string;
+  let finalUrl: string;
+  let fetchedContentType: string | null;
+  try {
+    const fetched = await safeFetch(doc.sourceUrl, {
+      maxBytes: MAX_HTML_BYTES,
+      timeoutMs: FETCH_TIMEOUT_MS,
+      allowLoopback: ALLOW_LOOPBACK,
+    });
+    if (fetched.status < 200 || fetched.status >= 300) {
+      await markFailed(docId, `the page answered HTTP ${fetched.status}`);
+      return;
+    }
+    htmlText = fetched.bytes.toString("utf8");
+    finalUrl = fetched.finalUrl;
+    fetchedContentType = fetched.contentType;
+  } catch (e) {
+    await markFailed(docId, e instanceof SsrfError ? `blocked address: ${e.message}` : "fetch failed: " + String(e));
+    return;
+  }
+  if (fetchedContentType && !/text\/html|application\/xhtml/i.test(fetchedContentType)) {
+    await markFailed(docId, "the URL does not serve an HTML page");
+    return;
+  }
+
+  // 2. Extract + re-host images. Each image is fetched SSRF-safely too,
+  //    encrypted, and stored as an asset; a failed download keeps the
+  //    original src (the image just does not render — no crash).
+  const assetIds: string[] = [];
+  try {
+    const article = await extractArticle(htmlText, finalUrl, async (img) => {
+      try {
+        const imgRes = await safeFetch(img.url, {
+          maxBytes: MAX_IMAGE_BYTES,
+          timeoutMs: FETCH_TIMEOUT_MS,
+          allowLoopback: ALLOW_LOOPBACK,
+        });
+        if (imgRes.status < 200 || imgRes.status >= 300) return null;
+        const bytes = new Uint8Array(imgRes.bytes);
+        const mime =
+          imgRes.contentType?.split(";")[0] ??
+          mimeByPath(img.url) ??
+          "application/octet-stream";
+        if (!mime.startsWith("image/")) return null;
+        const assetId = crypto.randomUUID();
+        await objectStore.put(bytes, doc.userId, mime, assetId);
+        const size = imageSize(bytes);
+        await db.insert(assets).values({
+          id: assetId,
+          userId: doc.userId,
+          documentId: docId,
+          objectId: assetId,
+          role: "image",
+          mime,
+          width: size?.width ?? null,
+          height: size?.height ?? null,
+        });
+        assetIds.push(assetId);
+        return assetId;
+      } catch {
+        return null;
+      }
+    });
+
+    // 3. Store the section (one section per article).
+    const secId = crypto.randomUUID();
+    const htmlObjId = crypto.randomUUID();
+    await objectStore.put(new TextEncoder().encode(article.html), doc.userId, "text/html", htmlObjId);
+    await db.insert(sections).values({
+      id: secId,
+      userId: doc.userId,
+      documentId: docId,
+      idx: 0,
+      title: article.title,
+      htmlObjectId: htmlObjId,
+      canonicalLength: article.canonicalText.length,
+      searchVector: sql`to_tsvector('simple', ${article.canonicalText})`,
+    });
+
+    // 4. Finalize the document row.
+    await db
+      .update(documents)
+      .set({
+        title: article.title,
+        author: article.byline,
+        language: article.language,
+        parserVersion: ARTICLE_PARSER_VERSION,
+        ingestState: "ready",
+        wordCount: article.wordCount,
+        updatedAt: new Date(),
+      })
+      .where(eq(documents.id, docId));
+
+    // eslint-disable-next-line no-console
+    console.log(`[worker] ${docId}: ready (article, ${article.wordCount} words, ${assetIds.length} images)`);
+  } catch (e) {
+    // Best-effort: drop the image assets that already landed.
+    for (const aid of assetIds) {
+      await db.delete(assets).where(eq(assets.id, aid)).catch(() => {});
+      await objectStore.delete(aid).catch(() => {});
+    }
+    await markFailed(docId, e instanceof ArticleError ? e.message : "article ingest failed: " + String(e));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // backup.nightly
 // ---------------------------------------------------------------------------
 
@@ -283,6 +418,26 @@ await boss.work<EpubProcessJob>(
         await markFailed(docId, "worker crashed: " + String(err)).catch(() => {});
         throw err;
       }
+    }
+  },
+);
+
+// Article ingest (slice 5). Fetch failures (DNS, blocked address, HTTP error)
+// are terminal — retrying the same URL rarely helps — so no retries.
+await boss.createQueue(JOB_ARTICLE_PROCESS, {
+  name: JOB_ARTICLE_PROCESS,
+  expireInSeconds: 3600,
+  retryLimit: 0,
+  retentionSeconds: 7 * 24 * 3600,
+});
+await boss.work<ArticleProcessJob>(
+  JOB_ARTICLE_PROCESS,
+  {
+    batchSize: 1,
+  },
+  async (jobs) => {
+    for (const job of jobs) {
+      await processArticle(job.data.documentId);
     }
   },
 );

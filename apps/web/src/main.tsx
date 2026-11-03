@@ -9,7 +9,7 @@ import {
 } from "@tanstack/react-query";
 import { api } from "./api";
 import type { DocumentMeta } from "./api";
-import type { HighlightItem, TocEntryDto } from "@reader/shared";
+import type { HighlightItem, TocEntryDto, TagItem, PatchDocumentBody } from "@reader/shared";
 import type { PatchHighlightBody, PostHighlightBody } from "@reader/shared/highlights";
 // Value imports go through subpaths: the shared barrel re-exports node-only
 // crypto modules (rdr1, asset-url) that the browser bundle must not reach.
@@ -202,53 +202,246 @@ function UploadButton({ onUploaded }: { onUploaded: () => void }) {
   );
 }
 
+function AddUrlButton({ onAdded }: { onAdded: () => void }) {
+  const [open, setOpen] = React.useState(false);
+  const [url, setUrl] = React.useState("");
+  const [err, setErr] = React.useState<string | null>(null);
+  const add = useMutation({
+    mutationFn: (u: string) => api.addUrl(u),
+    onSuccess: () => {
+      setOpen(false);
+      setUrl("");
+      setErr(null);
+      onAdded();
+    },
+    onError: (e: Error) => setErr(e.message),
+  });
+  return (
+    <span>
+      <button
+        type="button"
+        data-testid="add-url-btn"
+        onClick={() => setOpen(!open)}
+        style={{ padding: "8px 14px", border: "1px dashed #ccc", borderRadius: 8, background: "none", cursor: "pointer" }}
+      >
+        + Add article URL
+      </button>
+      {open ? (
+        <form
+          data-testid="add-url-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const v = url.trim();
+            if (v) add.mutate(v);
+          }}
+          style={{ display: "flex", gap: 6, marginTop: 8 }}
+        >
+          <input
+            data-testid="add-url-input"
+            type="url"
+            value={url}
+            placeholder="https://…"
+            onChange={(e) => setUrl(e.target.value)}
+            style={{ fontSize: 15, padding: 7, width: 320 }}
+          />
+          <button type="submit" disabled={add.isPending || !url.trim()} data-testid="add-url-go">
+            {add.isPending ? "Adding…" : "Add"}
+          </button>
+        </form>
+      ) : null}
+      {err ? (
+        <p style={{ color: "crimson", fontSize: 13, maxWidth: 340 }} data-testid="add-url-error">
+          {err}
+        </p>
+      ) : null}
+    </span>
+  );
+}
+
 function Library({ onOpen }: { onOpen: (id: string) => void }) {
-  const docs = useQuery({ queryKey: ["documents"], queryFn: api.listDocuments, refetchInterval: 10_000 });
   const queryClient = useQueryClient();
+  const [filterTag, setFilterTag] = React.useState<string | null>(null);
+  const docs = useQuery({
+    queryKey: ["documents", filterTag ?? ""],
+    queryFn: () => api.listDocuments(filterTag ?? undefined),
+    refetchInterval: 10_000,
+  });
+  const allTags = useQuery({ queryKey: ["tags"], queryFn: api.listTags, staleTime: 30_000 });
+  const invalidate = () => void queryClient.invalidateQueries({ queryKey: ["documents"] });
   const items = docs.data?.items ?? [];
+  const tagNames = (allTags.data?.items ?? []).map((t) => t.name);
   return (
     <div data-testid="library">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "12px 0" }}>
         <h2 style={{ margin: 0 }}>Library</h2>
-        <UploadButton onUploaded={() => void queryClient.invalidateQueries({ queryKey: ["documents"] })} />
+        <span style={{ display: "inline-flex", gap: 8 }}>
+          <AddUrlButton onAdded={() => invalidate()} />
+          <UploadButton onUploaded={() => invalidate()} />
+        </span>
       </div>
+      {tagNames.length > 0 ? (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }} data-testid="tag-filter">
+          <button
+            type="button"
+            onClick={() => setFilterTag(null)}
+            data-testid="tag-filter-all"
+            style={chipStyle(filterTag === null)}
+          >
+            all
+          </button>
+          {tagNames.map((n) => (
+            <button key={n} type="button" onClick={() => setFilterTag(n)} data-testid="tag-filter-chip" style={chipStyle(filterTag === n)}>
+              {n}
+            </button>
+          ))}
+        </div>
+      ) : null}
       {docs.isError ? (
         <p style={{ color: "crimson" }} data-testid="library-error">{String(docs.error)}</p>
       ) : items.length === 0 ? (
         <p style={{ opacity: 0.7 }} data-testid="library-empty">
-          No books yet. Upload an EPUB to get started.
+          No books yet. Upload an EPUB or add an article URL to get started.
         </p>
       ) : (
         <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: 8 }}>
           {items.map((d) => (
-            <li key={d.id}>
-              <button
-                onClick={() => onOpen(d.id)}
-                data-testid="doc-row"
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  width: "100%",
-                  padding: "12px 14px",
-                  border: "1px solid #e0e0e0",
-                  borderRadius: 10,
-                  background: "#fff",
-                  cursor: "pointer",
-                  textAlign: "left",
-                }}
-              >
-                <div>
-                  <div style={{ fontWeight: 600 }}>{d.title || "Untitled"}</div>
-                  {d.author ? <div style={{ opacity: 0.7, fontSize: 13 }}>{d.author}</div> : null}
-                </div>
-                <IngestBadge state={d.ingestState} error={d.ingestError} />
-              </button>
-            </li>
+            <DocRow key={d.id} doc={d} tags={allTags.data?.items ?? []} onOpen={() => onOpen(d.id)} onChanged={() => void queryClient.invalidateQueries({ queryKey: ["documents"] })} onTagsChanged={() => void queryClient.invalidateQueries({ queryKey: ["tags"] })} />
           ))}
         </ul>
       )}
     </div>
+  );
+}
+
+const TAG_CHIP = "#eef3ff";
+
+function chipStyle(active: boolean): React.CSSProperties {
+  return {
+    padding: "3px 10px",
+    borderRadius: 999,
+    border: `1px solid ${active ? "#4a6cf7" : "#d8d8d8"}`,
+    background: active ? "#4a6cf7" : "#fff",
+    color: active ? "#fff" : "#333",
+    fontSize: 12,
+    cursor: "pointer",
+  };
+}
+
+function DocRow({
+  doc,
+  tags,
+  onOpen,
+  onChanged,
+  onTagsChanged,
+}: {
+  doc: DocumentMeta;
+  /** Full tag list (names→ids map for PATCH tagIds), from the Library query. */
+  tags: TagItem[];
+  onOpen: () => void;
+  onChanged: () => void;
+  onTagsChanged: () => void;
+}) {
+  const [addingTag, setAddingTag] = React.useState(false);
+  const [newTag, setNewTag] = React.useState("");
+  const [err, setErr] = React.useState<string | null>(null);
+  const patch = useMutation({
+    mutationFn: (body: Record<string, unknown>) => api.patchDocument(doc.id, body as PatchDocumentBody),
+    onSuccess: () => {
+      setErr(null);
+      setAddingTag(false);
+      setNewTag("");
+      onChanged();
+      onTagsChanged();
+    },
+    onError: (e: Error) => setErr(e.message),
+  });
+  const remove = useMutation({
+    mutationFn: () => api.deleteDocument(doc.id),
+    onSuccess: () => onChanged(),
+    onError: (e: Error) => setErr(e.message),
+  });
+  const tagIdsFor = (names: string[]) => tags.filter((t) => names.includes(t.name)).map((t) => t.id);
+  return (
+    <li data-testid="doc-row-card" style={{ border: "1px solid #e0e0e0", borderRadius: 10, background: "#fff", padding: 10 }}>
+      <button
+        onClick={onOpen}
+        data-testid="doc-row"
+        style={{ display: "block", width: "100%", border: "none", background: "none", cursor: "pointer", textAlign: "left", padding: 0 }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {doc.title || "Untitled"}
+              {doc.type === "article" ? <span style={{ opacity: 0.5, fontSize: 12, marginLeft: 6 }}>article</span> : null}
+            </div>
+            {doc.author ? <div style={{ opacity: 0.7, fontSize: 13 }}>{doc.author}</div> : null}
+            {doc.tags.length > 0 ? (
+              <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 4 }}>
+                {doc.tags.map((t) => (
+                  <span key={t} style={{ fontSize: 11, padding: "1px 8px", borderRadius: 999, background: TAG_CHIP, color: "#2a3f8f" }} data-testid="doc-tag">
+                    {t}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+          </div>
+          <IngestBadge state={doc.ingestState} error={doc.ingestError} />
+        </div>
+      </button>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}>
+        <select
+          data-testid="doc-status"
+          value={doc.status}
+          onChange={(e) => patch.mutate({ status: e.target.value })}
+          style={{ fontSize: 12, padding: "2px 4px" }}
+        >
+          <option value="inbox">inbox</option>
+          <option value="later">later</option>
+          <option value="archive">archive</option>
+        </select>
+        <button
+          type="button"
+          data-testid="doc-add-tag"
+          onClick={() => setAddingTag(!addingTag)}
+          style={{ fontSize: 12, padding: "2px 8px", border: "1px dashed #ccc", borderRadius: 999, background: "none", cursor: "pointer", opacity: 0.7 }}
+        >
+          + tag
+        </button>
+        {addingTag ? (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              const v = newTag.trim();
+              if (!v) return;
+              void api
+                .createTag(v)
+                .then((tag) => patch.mutate({ tagIds: [...new Set([...tagIdsFor(doc.tags), tag.id])] }))
+                .catch((e2: Error) => setErr(e2.message));
+            }}
+            style={{ display: "flex", gap: 4 }}
+          >
+            <input
+              data-testid="doc-tag-input"
+              value={newTag}
+              onChange={(e) => setNewTag(e.target.value)}
+              placeholder="tag name"
+              style={{ fontSize: 12, padding: "2px 6px", width: 110 }}
+            />
+          </form>
+        ) : null}
+        <button
+          type="button"
+          data-testid="doc-delete"
+          onClick={() => {
+            if (window.confirm(`Delete "${doc.title}"?`)) remove.mutate();
+          }}
+          style={{ fontSize: 12, padding: "2px 8px", border: "1px solid #e5c8c8", borderRadius: 999, background: "none", color: "#a33", cursor: "pointer", marginLeft: "auto" }}
+        >
+          delete
+        </button>
+      </div>
+      {err ? <p style={{ color: "crimson", fontSize: 12 }} data-testid="doc-row-error">{err}</p> : null}
+    </li>
   );
 }
 
