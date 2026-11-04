@@ -1,9 +1,11 @@
 /**
- * Slice 2 documents API (PLAN slice 2, SPECS §2, §3, §11, §12).
+ * Slice 2 documents API (PLAN slice 2, SPECS §2, §3, §11, §12) + slice 6 PDF.
  *
  *   POST /v1/documents/upload          multipart, one file, max 200 MB.
  *                                      Streamed RDR1-encrypted to Hippius;
- *                                      document row + pg-boss job.
+ *                                      document row + pg-boss job. PDFs are
+ *                                      detected by magic bytes (or extension)
+ *                                      and queued for pdf.process.
  *   GET  /v1/documents                 cursor-paginated library list.
  *   GET  /v1/documents/:id             document detail (+ cover URL).
  *   GET  /v1/documents/:id/toc         flat TOC with parent refs.
@@ -11,6 +13,8 @@
  *   GET  /v1/documents/:id/sections/:sid
  *                                      section html, asset:<id> rewritten to
  *                                      short-lived signed URLs.
+ *   GET  /v1/documents/:id/original    { url } signed range-capable URL of
+ *                                      the original (pdf.js, slice 6).
  *   GET  /v1/assets/:id?exp&sig        signed asset bytes (Range-capable).
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -29,7 +33,7 @@ import {
 } from "@reader/shared";
 import { csrfOk } from "../services/csrf.js";
 import { authenticate, SESSION_COOKIE, type Authenticated } from "../services/session.js";
-import { JOB_ARTICLE_PROCESS, JOB_EPUB_PROCESS } from "../jobs/boss.js";
+import { JOB_ARTICLE_PROCESS, JOB_EPUB_PROCESS, JOB_PDF_PROCESS } from "../jobs/boss.js";
 import { streamEncrypt } from "../storage/rdr1-stream.js";
 
 /** SPECS: uploads are capped at 200 MB (also enforced by Caddy `request_body`). */
@@ -66,8 +70,18 @@ function mutatingCsrfOk(req: FastifyRequest, config: AppConfig): boolean {
 }
 
 function fileTitle(filename: string | undefined): string {
-  const base = (filename ?? "untitled").replace(/\.epub$/i, "").replace(/[_-]+/g, " ").trim();
+  const base = (filename ?? "untitled").replace(/\.(epub|pdf)$/i, "").replace(/[_-]+/g, " ").trim();
   return base || "untitled";
+}
+
+/**
+ * Cheap PDF detection at upload time (mime type or extension). The
+ * authoritative validation is the worker's pdf.js open: an impostor file
+ * fails there with a clear ingest error, exactly like a broken epub.
+ */
+function isPdfUpload(part: { filename?: string; mimetype?: string }): boolean {
+  if (part.mimetype === "application/pdf") return true;
+  return /\.pdf$/i.test(part.filename ?? "");
 }
 
 /** Alphabetized tag names for a set of documents (SPECS §11). */
@@ -124,6 +138,7 @@ export async function registerDocuments(app: FastifyInstance, ctx: DocumentsCont
     if (!part) return err(reply, 400, "invalid_request", "expected a single multipart file field");
 
     const filename = part.filename;
+    const isPdf = isPdfUpload(part);
     const docId = crypto.randomUUID();
     const objectId = crypto.randomUUID();
 
@@ -134,7 +149,7 @@ export async function registerDocuments(app: FastifyInstance, ctx: DocumentsCont
       const putP = objectStore.putCiphertextStream(ciphertext, objectId);
       const meta = await onDone;
       await putP;
-      await objectStore.recordObject(objectId, meta, authed.user.id, "application/octet-stream");
+      await objectStore.recordObject(objectId, meta, authed.user.id, isPdf ? "application/pdf" : "application/octet-stream");
     } catch (e) {
       // Best-effort cleanup: remove a partially uploaded object.
       await objectStore.delete(objectId).catch(() => {});
@@ -147,7 +162,7 @@ export async function registerDocuments(app: FastifyInstance, ctx: DocumentsCont
       .values({
         id: docId,
         userId: authed.user.id,
-        type: "epub",
+        type: isPdf ? "pdf" : "epub",
         title: fileTitle(filename),
         originalObjectId: objectId,
         ingestState: "pending",
@@ -155,9 +170,9 @@ export async function registerDocuments(app: FastifyInstance, ctx: DocumentsCont
       .returning();
 
     try {
-      await boss.send(JOB_EPUB_PROCESS, { documentId: docId });
+      await boss.send(isPdf ? JOB_PDF_PROCESS : JOB_EPUB_PROCESS, { documentId: docId });
     } catch (e) {
-      req.log.error({ err: e }, "could not queue the epub job");
+      req.log.error({ err: e }, "could not queue the ingest job");
       // The document stays pending; the worker's stalled-job sweep will
       // pick it up (or the user re-uploads).
     }
@@ -273,6 +288,9 @@ export async function registerDocuments(app: FastifyInstance, ctx: DocumentsCont
       ingestState: d.ingestState,
       ingestError: d.ingestError,
       wordCount: d.wordCount,
+      pdfModeAvailable: d.pdfModeAvailable,
+      pageCount: d.pageCount,
+      pdfHasText: d.pdfHasText,
       tags: tagMap.get(d.id) ?? [],
       createdAt: d.createdAt.toISOString(),
       updatedAt: d.updatedAt.toISOString(),
@@ -315,6 +333,9 @@ export async function registerDocuments(app: FastifyInstance, ctx: DocumentsCont
       ingestState: doc.ingestState,
       ingestError: doc.ingestError,
       wordCount: doc.wordCount,
+      pdfModeAvailable: doc.pdfModeAvailable,
+      pageCount: doc.pageCount,
+      pdfHasText: doc.pdfHasText,
       tags: tagMap.get(doc.id) ?? [],
       createdAt: doc.createdAt.toISOString(),
       updatedAt: doc.updatedAt.toISOString(),
@@ -393,6 +414,9 @@ export async function registerDocuments(app: FastifyInstance, ctx: DocumentsCont
       ingestState: fresh!.ingestState,
       ingestError: fresh!.ingestError,
       wordCount: fresh!.wordCount,
+      pdfModeAvailable: fresh!.pdfModeAvailable,
+      pageCount: fresh!.pageCount,
+      pdfHasText: fresh!.pdfHasText,
       tags: tagMap.get(docId) ?? [],
       createdAt: fresh!.createdAt.toISOString(),
       updatedAt: fresh!.updatedAt.toISOString(),
@@ -455,6 +479,7 @@ export async function registerDocuments(app: FastifyInstance, ctx: DocumentsCont
         parentId: t.parentId,
         label: t.label,
         sectionId: t.sectionId,
+        page: t.page,
       })),
     };
   });
@@ -525,6 +550,28 @@ export async function registerDocuments(app: FastifyInstance, ctx: DocumentsCont
       prevSectionId: i > 0 ? neighbours[i - 1]!.id : null,
       nextSectionId: i >= 0 && i < neighbours.length - 1 ? neighbours[i + 1]!.id : null,
     };
+  });
+
+  // ---- GET /v1/documents/:id/original (slice 6, pdf.js) -----------------------
+  // { url } — a short-lived signed URL of the original upload, served with
+  // Range support by /v1/assets/:id. pdf.js loads the PDF through it.
+  app.get("/v1/documents/:id/original", async (req, reply) => {
+    const authed = await authedUser(req, config, now);
+    if (!authed) return err(reply, 401, "unauthorized", "not signed in");
+    const docId = (req.params as { id: string }).id;
+    const doc = await ownedDocument(docId, authed.user.id);
+    if (!doc) return err(reply, 404, "not_found", "no such document");
+    if (doc.type !== "pdf") return err(reply, 400, "not_pdf", "this document is not a PDF");
+
+    const origRows = await getDb()
+      .select({ id: assets.id })
+      .from(assets)
+      .where(and(eq(assets.documentId, docId), eq(assets.userId, authed.user.id), eq(assets.role, "original")))
+      .limit(1);
+    const orig = origRows[0];
+    if (!orig) return err(reply, 503, "not_ready", "the original is not stored yet");
+
+    return { url: assetUrl(orig.id, authed.user.id), pageCount: doc.pageCount };
   });
 
   // ---- GET /v1/assets/:id (signed, Range-capable) -----------------------------

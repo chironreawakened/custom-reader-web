@@ -94,6 +94,47 @@ export type PdfAnchorInput = z.infer<typeof pdfAnchor>;
 export const highlightAnchor = z.discriminatedUnion("kind", [reflowAnchor, pdfAnchor]);
 export type HighlightAnchorInput = z.infer<typeof highlightAnchor>;
 
+/**
+ * The two anchor kinds carry the same four fields that drive resolution;
+ * the ladder (steps 1–4) is identical for both (SPECS §7), so it operates
+ * on this common shape.
+ */
+interface ResolvableAnchor {
+  exact: string;
+  prefix: string;
+  suffix: string;
+  offsetHint: number;
+}
+
+// ---------------------------------------------------------------------------
+// PDF page text (shared: the anchor's coordinate system, SPECS §7)
+// ---------------------------------------------------------------------------
+
+/**
+ * One text-layer item, in the order the page returns them (pdf.js
+ * `TextItem` has `str` + `hasEOL`; marked-content items carry neither and
+ * are ignored).
+ */
+export interface PdfPageTextItem {
+  str: string;
+  hasEOL?: boolean;
+}
+
+/**
+ * The page's text-layer string: items in reading order, a "\n" after every
+ * item with hasEOL. Both buildPdfAnchor and resolvePdfAnchor work in this
+ * string (SPECS §7: offsetHint is "offset in that page's text-layer
+ * string"), so the web client must build it with this exact rule.
+ */
+export function pdfPageText(items: PdfPageTextItem[]): string {
+  let s = "";
+  for (const it of items) {
+    s += it.str;
+    if (it.hasEOL) s += "\n";
+  }
+  return s;
+}
+
 // ---------------------------------------------------------------------------
 // Building (client: selection → anchor)
 // ---------------------------------------------------------------------------
@@ -113,6 +154,37 @@ function contextBefore(text: string, end: number): string {
 function contextAfter(text: string, start: number): string {
   const e = Math.min(text.length, start + ANCHOR_CONTEXT_CHARS);
   return text.slice(start, e);
+}
+
+/**
+ * Build a storable PdfAnchor from a selection expressed as offsets in the
+ * 1-based page's text-layer string (the concatenation of that page's text
+ * items, in reading order — the same string the client reads back at
+ * render time, SPECS §7).
+ */
+export function buildPdfAnchor(
+  page: number,
+  sel: CanonicalSelection,
+  text: string,
+): PdfAnchor {
+  if (typeof page !== "number" || !Number.isInteger(page) || page < 1) {
+    throw new Error("buildPdfAnchor: page must be a positive integer");
+  }
+  if (typeof sel.start !== "number" || typeof sel.end !== "number") {
+    throw new Error("buildPdfAnchor: start/end must be numbers");
+  }
+  if (sel.start < 0 || sel.end > text.length || sel.end <= sel.start) {
+    throw new Error("buildPdfAnchor: empty or out-of-range selection");
+  }
+  return {
+    kind: "pdf",
+    v: 1,
+    page,
+    exact: text.slice(sel.start, sel.end),
+    prefix: contextBefore(text, sel.start),
+    suffix: contextAfter(text, sel.end),
+    offsetHint: sel.start,
+  };
 }
 
 /**
@@ -170,7 +242,7 @@ const FUZZY_WINDOWS = [2048, 16384];
  * The context match is required for step 1 and is part of the score for
  * step 2; it is only checked over the prefix/suffix we actually have.
  */
-function contextMatches(text: string, pos: number, anchor: ReflowAnchor): boolean {
+function contextMatches(text: string, pos: number, anchor: ResolvableAnchor): boolean {
   if (anchor.prefix !== "") {
     if (text.slice(Math.max(0, pos - anchor.prefix.length), pos) !== anchor.prefix) {
       return false;
@@ -226,7 +298,7 @@ function fuzzy(): DiffMatchPatch {
  * nearest the hint wins; falls back to the whole text. Returns the start
  * offset or -1.
  */
-function fuzzyFind(text: string, anchor: ReflowAnchor): number {
+function fuzzyFind(text: string, anchor: ResolvableAnchor): number {
   // diff-match-patch's match_bitap_ throws 'Pattern too long for this
   // browser.' when the pattern exceeds its Match_MaxBits (32). Long highlights
   // therefore never reach the fuzzy step — they degrade to the literal
@@ -247,11 +319,11 @@ function fuzzyFind(text: string, anchor: ReflowAnchor): number {
 }
 
 /**
- * Resolve a ReflowAnchor against a section's canonical text (SPECS §7, the
- * four-step ladder). `text` is `canonicalText(sectionHtml).text` — the same
- * string the client used when building the anchor, for an unmodified section.
+ * The four-step resolution ladder (SPECS §7) over an arbitrary text string.
+ * Shared by both anchor kinds: a ReflowAnchor resolves against a section's
+ * canonical text, a PdfAnchor against that page's text-layer string.
  */
-export function resolveAnchor(anchor: ReflowAnchor, text: string): AnchorResolution {
+function resolveInText(anchor: ResolvableAnchor, text: string): AnchorResolution {
   const { exact, offsetHint } = anchor;
   if (exact === "") return { status: "orphaned" };
 
@@ -290,6 +362,25 @@ export function resolveAnchor(anchor: ReflowAnchor, text: string): AnchorResolut
 
   // 4. Orphaned — shown in the list, not in the text, never dropped.
   return { status: "orphaned" };
+}
+
+/**
+ * Resolve a ReflowAnchor against a section's canonical text (SPECS §7, the
+ * four-step ladder). `text` is `canonicalText(sectionHtml).text` — the same
+ * string the client used when building the anchor, for an unmodified section.
+ */
+export function resolveAnchor(anchor: ReflowAnchor, text: string): AnchorResolution {
+  return resolveInText(anchor, text);
+}
+
+/**
+ * Resolve a PdfAnchor against its page's text-layer string (SPECS §7 — the
+ * same ladder as reflow anchors, over the page text instead of canonical
+ * section text). `text` is the concatenation of the page's text items in
+ * reading order — the same string the client built the anchor from.
+ */
+export function resolvePdfAnchor(anchor: PdfAnchor, text: string): AnchorResolution {
+  return resolveInText(anchor, text);
 }
 
 // ---------------------------------------------------------------------------

@@ -50,6 +50,13 @@
       "when": 1793685520433,
       "tag": "0006_kind_ben_grimm",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1793800225614,
+      "tag": "0007_pdf_faithful",
+      "breakpoints": true
     }
   ]
 }

@@ -30,10 +30,10 @@ import {
   postHighlightBody,
   resolveAnchor,
   type CTElement,
+  type HighlightAnchor,
   type HighlightColor,
   type HighlightItem,
   type PostHighlightBody,
-  type ReflowAnchor,
 } from "@reader/shared";
 import { csrfOk } from "../services/csrf.js";
 import { authenticate, SESSION_COOKIE, type Authenticated } from "../services/session.js";
@@ -146,7 +146,7 @@ export async function registerHighlights(app: FastifyInstance, ctx: HighlightsCo
     return out;
   }
 
-  function isOrphaned(anchor: ReflowAnchor, canon: string | undefined): boolean {
+  function isOrphaned(anchor: HighlightAnchor, canon: string | undefined): boolean {
     if (anchor.kind !== "reflow") return false; // pdf anchors resolve in the PDF reader
     if (canon === undefined || canon === "") return true;
     return resolveAnchor(anchor, canon).status === "orphaned";
@@ -160,7 +160,7 @@ export async function registerHighlights(app: FastifyInstance, ctx: HighlightsCo
     return {
       id: row.id,
       documentId: row.documentId,
-      sectionId: row.anchor.sectionId,
+      sectionId: row.anchor.kind === "reflow" ? row.anchor.sectionId : null,
       anchor: row.anchor,
       exact: row.exact,
       color: row.color,
@@ -214,10 +214,12 @@ export async function registerHighlights(app: FastifyInstance, ctx: HighlightsCo
     for (const [docId, docRows] of byDoc) {
       if (q.documentId && q.documentId !== docId) continue;
       const titles = await sectionTitles(docId);
-      const secIds = new Set(docRows.map((r) => r.anchor.sectionId));
+      const secIds = new Set(docRows.map((r) => (r.anchor.kind === "reflow" ? r.anchor.sectionId : null)).filter((x): x is string => !!x));
       const canon = await sectionCanonicalTexts(docId, authed.user.id, secIds);
       for (const r of docRows) {
-        items.push(toItem(r, titles.get(r.anchor.sectionId) ?? null, isOrphaned(r.anchor, canon.get(r.anchor.sectionId))));
+        const sectionId = r.anchor.kind === "reflow" ? r.anchor.sectionId : null;
+        const title = r.anchor.kind === "pdf" ? `Page ${r.anchor.page}` : (sectionId ? (titles.get(sectionId) ?? null) : null);
+        items.push(toItem(r, title, isOrphaned(r.anchor, sectionId ? canon.get(sectionId) : undefined)));
       }
     }
     return reply.status(200).send({ items, total: items.length });
@@ -238,15 +240,26 @@ export async function registerHighlights(app: FastifyInstance, ctx: HighlightsCo
     const doc = await ownedDocument(body.documentId, authed.user.id);
     if (!doc) return err(reply, 404, "not_found", "no such document");
 
-    // The anchor must point at a section of this document (cross-document
-    // or phantom section ids are rejected, not silently stored).
-    const secRows = await getDb()
-      .select({ id: sections.id })
-      .from(sections)
-      .where(and(eq(sections.id, body.anchor.sectionId), eq(sections.documentId, body.documentId)))
-      .limit(1);
-    if (secRows.length === 0) {
-      return err(reply, 400, "invalid_request", "anchor section is not part of this document");
+    if (body.anchor.kind === "pdf") {
+      // A PDF anchor only makes sense on a ready PDF document, and its
+      // page must exist (SPECS §7: page is 1-based).
+      if (doc.type !== "pdf") {
+        return err(reply, 400, "invalid_request", "pdf anchors require a PDF document");
+      }
+      if (body.anchor.page > (doc.pageCount ?? 0)) {
+        return err(reply, 400, "invalid_request", "anchor page is out of range");
+      }
+    } else {
+      // The anchor must point at a section of this document (cross-document
+      // or phantom section ids are rejected, not silently stored).
+      const secRows = await getDb()
+        .select({ id: sections.id })
+        .from(sections)
+        .where(and(eq(sections.id, body.anchor.sectionId), eq(sections.documentId, body.documentId)))
+        .limit(1);
+      if (secRows.length === 0) {
+        return err(reply, 400, "invalid_request", "anchor section is not part of this document");
+      }
     }
 
     const storedUpdatedAt = new Date(now());
@@ -362,17 +375,20 @@ export async function registerHighlights(app: FastifyInstance, ctx: HighlightsCo
         .limit(1);
       const title = docRows2[0]?.title ?? "Untitled";
       const titles = await sectionTitles(docId);
-      const secIds = new Set(docRows.map((r) => r.anchor.sectionId));
+      const secIds = new Set(docRows.map((r) => (r.anchor.kind === "reflow" ? r.anchor.sectionId : null)).filter((x): x is string => !!x));
       const canon = await sectionCanonicalTexts(docId, authed.user.id, secIds);
       const md = formatHighlightMarkdown(
         title,
-        docRows.map((r) => ({
-          exact: r.exact,
-          sectionTitle: titles.get(r.anchor.sectionId) ?? null,
-          color: r.color,
-          note: r.note,
-          orphaned: isOrphaned(r.anchor, canon.get(r.anchor.sectionId)),
-        })),
+        docRows.map((r) => {
+          const sectionId = r.anchor.kind === "reflow" ? r.anchor.sectionId : null;
+          return {
+            exact: r.exact,
+            sectionTitle: r.anchor.kind === "pdf" ? `Page ${r.anchor.page}` : (sectionId ? (titles.get(sectionId) ?? null) : null),
+            color: r.color,
+            note: r.note,
+            orphaned: isOrphaned(r.anchor, sectionId ? canon.get(sectionId) : undefined),
+          };
+        }),
       );
       if (md) blocks.push(md);
     }

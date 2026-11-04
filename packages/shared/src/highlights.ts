@@ -3,24 +3,25 @@
  * the web client. Source of the OpenAPI spec (slice 10).
  */
 import { z } from "zod";
-import { highlightColor, reflowAnchor, type ReflowAnchor } from "./anchors.js";
+import { highlightAnchor, highlightColor, type HighlightAnchor, type ReflowAnchor } from "./anchors.js";
 
 export const highlightItem = z.object({
   id: z.string().uuid(),
   documentId: z.string().uuid(),
-  /** Convenience for clients: the anchor's sectionId. */
-  sectionId: z.string().uuid(),
-  anchor: reflowAnchor,
+  /** Convenience for clients: the anchor's sectionId (null for PDF anchors). */
+  sectionId: z.string().uuid().nullable(),
+  anchor: highlightAnchor,
   exact: z.string(),
   color: highlightColor.nullable(),
   note: z.string().nullable(),
   /**
    * Server-computed (SPECS §7): false when the anchor no longer resolves in
    * the section's current canonical text — the item is still returned,
-   * just not drawn in the text.
+   * just not drawn in the text. PDF anchors resolve in the reader against
+   * the page text layer and are reported non-orphaned.
    */
   orphaned: z.boolean(),
-  /** Display title of the containing section (null when unknown). */
+  /** Display title of the containing section ("Page N" for PDF anchors). */
   sectionTitle: z.string().nullable(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
@@ -48,7 +49,8 @@ export type ListHighlightsResponse = z.infer<typeof listHighlightsResponse>;
 export const postHighlightBody = z
   .object({
     documentId: z.string().uuid(),
-    anchor: reflowAnchor,
+    /** Reflow anchors (epub/article) or PDF anchors (slice 6 faithful mode). */
+    anchor: highlightAnchor,
     exact: z.string().min(1).max(10_000),
     color: highlightColor.nullable().default(null),
     note: z.string().max(5_000).nullable().default(null),

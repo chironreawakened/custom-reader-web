@@ -1,6 +1,7 @@
 import type {
   ApiError,
   DocumentMeta,
+  DocumentOriginalResponse,
   GetDocumentResponse,
   GetSettingsResponse,
   ListDocumentsResponse,
@@ -81,6 +82,10 @@ export const api = {
   },
   getToc(id: string): Promise<TocResponse> {
     return fetch(`/v1/documents/${id}/toc`, { headers }).then((r) => unwrap<TocResponse>(r));
+  },
+  /** Slice 6: the signed range-capable URL of the original PDF (pdf.js). */
+  getDocumentOriginal(id: string): Promise<DocumentOriginalResponse> {
+    return fetch(`/v1/documents/${id}/original`, { headers }).then((r) => unwrap<DocumentOriginalResponse>(r));
   },
   listSections(id: string): Promise<ListSectionsResponse> {
     return fetch(`/v1/documents/${id}/sections`, { headers }).then((r) => unwrap<ListSectionsResponse>(r));

@@ -14,9 +14,11 @@ import type { PatchHighlightBody, PostHighlightBody } from "@reader/shared/highl
 // Value imports go through subpaths: the shared barrel re-exports node-only
 // crypto modules (rdr1, asset-url) that the browser bundle must not reach.
 import {
+  buildPdfAnchor,
   buildReflowAnchor,
   HIGHLIGHT_COLORS,
   resolveAnchor,
+  resolvePdfAnchor,
   type CanonicalSelection,
   type HighlightColor,
 } from "@reader/shared/anchors";
@@ -24,6 +26,23 @@ import { canonicalText, type CanonicalMap, type CTRoot } from "@reader/shared/ca
 // Subpath import: the shared barrel re-exports node-only crypto modules
 // (rdr1, asset-url) that the browser bundle must not reach.
 import { DEFAULT_READER_PREFS, MAX_FONT_SIZE, MIN_FONT_SIZE, type ReaderTheme } from "@reader/shared/settings";
+// Slice 6: pdf.js (faithful PDF rendering). The worker file is emitted by
+// Vite as an asset; `?url` keeps the path stable across dev/prod.
+import { GlobalWorkerOptions, getDocument } from "pdfjs-dist";
+import type { PDFDocumentProxy, PDFDocumentLoadingTask, PDFPageProxy } from "pdfjs-dist";
+import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+
+/** Structural view of a pdf.js text item (TextItem isn't re-exported in v6). */
+interface PdfTextItem {
+  str: string;
+  dir: string;
+  transform: number[];
+  width: number;
+  height: number;
+  hasEOL?: boolean;
+}
+
+GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const queryClient = new QueryClient();
 
@@ -185,10 +204,10 @@ function UploadButton({ onUploaded }: { onUploaded: () => void }) {
         opacity: upload.isPending ? 0.7 : 1,
       }}
     >
-      {upload.isPending ? "Uploading…" : "Upload EPUB"}
+      {upload.isPending ? "Uploading…" : "Upload"}
       <input
         type="file"
-        accept="application/epub+zip,.epub"
+        accept="application/epub+zip,.epub,application/pdf,.pdf"
         data-testid="upload-input"
         disabled={upload.isPending}
         style={{ display: "none" }}
@@ -300,7 +319,7 @@ function Library({ onOpen }: { onOpen: (id: string) => void }) {
         <p style={{ color: "crimson" }} data-testid="library-error">{String(docs.error)}</p>
       ) : items.length === 0 ? (
         <p style={{ opacity: 0.7 }} data-testid="library-empty">
-          No books yet. Upload an EPUB or add an article URL to get started.
+          No books yet. Upload an EPUB or PDF, or add an article URL, to get started.
         </p>
       ) : (
         <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: 8 }}>
@@ -372,7 +391,11 @@ function DocRow({
           <div style={{ minWidth: 0 }}>
             <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {doc.title || "Untitled"}
-              {doc.type === "article" ? <span style={{ opacity: 0.5, fontSize: 12, marginLeft: 6 }}>article</span> : null}
+              {doc.type === "pdf" ? (
+                <span style={{ opacity: 0.5, fontSize: 12, marginLeft: 6 }}>pdf</span>
+              ) : doc.type === "article" ? (
+                <span style={{ opacity: 0.5, fontSize: 12, marginLeft: 6 }}>article</span>
+              ) : null}
             </div>
             {doc.author ? <div style={{ opacity: 0.7, fontSize: 13 }}>{doc.author}</div> : null}
             {doc.tags.length > 0 ? (
@@ -857,16 +880,20 @@ function Pager({
   prevId,
   nextId,
   onNav,
+  middle,
 }: {
   prevId: string | null;
   nextId: string | null;
   onNav: (id: string) => void;
+  /** Optional center content (e.g. the PDF page indicator). */
+  middle?: React.ReactNode;
 }) {
   return (
-    <div style={{ display: "flex", justifyContent: "space-between", marginTop: 24, gap: 12 }}>
+    <div style={{ display: "flex", justifyContent: "space-between", marginTop: 24, gap: 12, alignItems: "center" }}>
       <button disabled={!prevId} onClick={() => prevId && onNav(prevId)} data-testid="prev-btn">
         ← Previous
       </button>
+      {middle ?? null}
       <button disabled={!nextId} onClick={() => nextId && onNav(nextId)} data-testid="next-btn">
         Next →
       </button>
@@ -1259,6 +1286,686 @@ function ErrorBox({ message, onBack }: { message: string; onBack: () => void }) 
   );
 }
 
+// ===========================================================================
+// Slice 6 — PDF faithful reader (pdf.js canvas + text-layer highlights)
+//
+// The ORIGINAL bytes load through the signed range-capable URL (GET
+// /v1/documents/:id/original → /v1/assets/:id), so a large PDF opens
+// without a full download (SPECS §3). Highlights use the page's text-layer
+// string (shared `pdfPageText` is the anchor's coordinate system, SPECS §7):
+// a selection's start/end DOM points are mapped to offsets in that string,
+// an anchor is built, and on re-render `resolvePdfAnchor` re-locates the
+// range for the <mark> overlay.
+// ===========================================================================
+
+/** Concatenate the text layer's string (the shared pdfPageText rule): text
+ *  nodes in document order, "\n" after each <br> the layer inserted. */
+function walkTextLayer(el: HTMLElement, parts: string[]): void {
+  for (const n of Array.from(el.childNodes)) {
+    if (n.nodeType === Node.TEXT_NODE) {
+      parts.push((n as Text).data);
+    } else if (n.nodeType === Node.ELEMENT_NODE) {
+      const e = n as HTMLElement;
+      if (e.tagName.toLowerCase() === "br") {
+        parts.push("\n");
+      } else {
+        walkTextLayer(e, parts);
+      }
+    }
+  }
+}
+
+/** Text nodes in the layer, each with its [start, end) span in the string.
+ *  `brAfter` = the layer put a <br> right after this node. */
+function collectTextNodes(root: HTMLElement): Array<{ node: Text; start: number; end: number; brAfter: boolean }> {
+  const out: Array<{ node: Text; start: number; end: number; brAfter: boolean }> = [];
+  let off = 0;
+  const walk = (el: HTMLElement) => {
+    for (const n of Array.from(el.childNodes)) {
+      if (n.nodeType === Node.TEXT_NODE) {
+        const t = n as Text;
+        if (t.data.length === 0) continue;
+        out.push({ node: t, start: off, end: off + t.data.length, brAfter: false });
+        off += t.data.length;
+      } else if (n.nodeType === Node.ELEMENT_NODE) {
+        const e = n as HTMLElement;
+        if (e.tagName.toLowerCase() === "br") {
+          off += 1;
+          if (out.length > 0) out[out.length - 1]!.brAfter = true;
+        } else {
+          walk(e);
+        }
+      }
+    }
+  };
+  walk(root);
+  return out;
+}
+
+/** A DOM point (selection anchor) → offset in the layer string, or null. */
+function pointToLayerString(container: Node, offset: number, isEnd: boolean, segs: Array<{ node: Text; start: number; end: number; brAfter: boolean }>): number | null {
+  if (container.nodeType === Node.TEXT_NODE) {
+    const t = container as Text;
+    if (t.data.length === 0) return null;
+    const idx = segs.findIndex((s) => s.node === t);
+    if (idx === -1) return null;
+    return segs[idx]!.start + offset;
+  }
+  if (container.nodeType !== Node.ELEMENT_NODE) return null;
+  const el = container as HTMLElement;
+  if (el.tagName.toLowerCase() === "br") {
+    const idx = segs.findIndex((s) => s.brAfter);
+    // The <br> sits after the node at idx-1 (brAfter marks it).
+    const brIdx = segs.findIndex((s) => s.brAfter && el === s.node.nextSibling);
+    if (brIdx !== -1) return segs[brIdx]!.start;
+    return idx >= 0 ? segs[idx]!.end : null;
+  }
+  const child = isEnd ? el.childNodes[offset - 1] ?? null : el.childNodes[offset] ?? null;
+  const findFirst = (n: Node | null): Text | null => {
+    if (!n) return null;
+    if (n.nodeType === Node.TEXT_NODE && (n as Text).data.length > 0) return n as Text;
+    for (const c of Array.from(n.childNodes)) {
+      const r = findFirst(c);
+      if (r) return r;
+    }
+    return null;
+  };
+  const findLast = (n: Node | null): Text | null => {
+    if (!n) return null;
+    for (let i = n.childNodes.length - 1; i >= 0; i--) {
+      const r = findLast(n.childNodes[i] ?? null);
+      if (r) return r;
+    }
+    if (n.nodeType === Node.TEXT_NODE && (n as Text).data.length > 0) return n as Text;
+    return null;
+  };
+  const node = isEnd ? findLast(child) : findFirst(child);
+  if (!node) return null;
+  const idx = segs.findIndex((s) => s.node === node);
+  if (idx === -1) return null;
+  if (isEnd) {
+    // Boundary at this node's end; a <br> after it belongs to "end" too.
+    return segs[idx]!.brAfter ? segs[idx]!.end + 1 : segs[idx]!.end;
+  }
+  return segs[idx]!.start;
+}
+
+/** DOM position for a string offset (where a mark boundary goes). */
+function layerStringToDom(off: number, segs: Array<{ node: Text; start: number; end: number }>): { node: Text; offset: number } | null {
+  for (const s of segs) {
+    if (off >= s.start && off <= s.end) {
+      // A boundary on the br-after gap snaps to this node's end.
+      return { node: s.node, offset: Math.min(s.end - s.start, off - s.start) };
+    }
+  }
+  // In a <br> gap: prefer the node before it.
+  let prev: (typeof segs)[number] | null = null;
+  for (const s of segs) {
+    if (s.end <= off) prev = s;
+    else break;
+  }
+  if (prev) return { node: prev.node, offset: prev.end - prev.start };
+  for (const s of segs) if (s.start > off) return { node: s.node, offset: 0 };
+  return null;
+}
+
+interface PdfPlacedMark {
+  hlId: string;
+  color: HighlightColor | null;
+  note: string | null;
+  start: number;
+  end: number;
+}
+
+/** Wrap each [start, end) slice of the text layer in <mark data-testid>. */
+function placePdfMarks(root: HTMLElement, marks: PdfPlacedMark[]): void {
+  const segs = collectTextNodes(root);
+  for (const m of marks) {
+    const s = layerStringToDom(m.start, segs);
+    const e = layerStringToDom(m.end, segs);
+    if (!s || !e) continue;
+    const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let n: Node | null;
+    let seen = false;
+    while ((n = w.nextNode())) {
+      const t = n as Text;
+      const idx = segs.findIndex((x) => x.node === t);
+      if (idx === -1) continue;
+      const sg = segs[idx]!;
+      if (sg.end <= m.start) continue;
+      if (!seen) {
+        if (t !== s.node) continue;
+        seen = true;
+      }
+      if (sg.start >= m.end) break;
+      const from = t === s.node ? s.offset : m.start - sg.start;
+      const to = t === e.node ? e.offset : m.end - sg.start;
+      if (to - from <= 0) continue;
+      let node = t;
+      if (from > 0) node = node.splitText(from);
+      const len = to - from;
+      if (len < node.data.length) node.splitText(len);
+      const range = document.createRange();
+      range.setStart(node, 0);
+      range.setEnd(node, node.data.length);
+      const mark = document.createElement("mark");
+      mark.setAttribute("data-testid", "hl-mark");
+      mark.setAttribute("data-highlight-id", m.hlId);
+      mark.style.background = HIGHLIGHT_BG[m.color ?? "yellow"];
+      mark.style.borderRadius = "2px";
+      if (m.note) mark.setAttribute("title", m.note);
+      range.surroundContents(mark);
+    }
+  }
+}
+
+/**
+ * Render one page into `canvas` + a self-rendered text layer in `layer`.
+ * Returns the page's text-layer string (the anchor coordinate system).
+ *
+ * The text layer mirrors pdf.js's own TextLayer positioning (transform the
+ * item matrix by the page transform, place a span at the resulting % with a
+ * font size from the matrix's y-scale) but is written by hand so we own the
+ * DOM (needed to map selections → offsets and to wrap highlights in <mark>).
+ * Font is a generic sans-serif, the same family the canvas metrics assume.
+ */
+const TEXT_LAYER_FONT = "sans-serif";
+
+async function renderPdfPage(
+  doc: PDFDocumentProxy,
+  pageNo: number,
+  canvas: HTMLCanvasElement,
+  layer: HTMLElement,
+  scale: number,
+): Promise<string> {
+  const page: PDFPageProxy = await doc.getPage(pageNo);
+  const viewport = page.getViewport({ scale });
+  const ratio = window.devicePixelRatio || 1;
+  const cssW = Math.floor(viewport.width);
+  const cssH = Math.floor(viewport.height);
+  canvas.width = Math.floor(viewport.width * ratio);
+  canvas.height = Math.floor(viewport.height * ratio);
+  canvas.style.width = `${cssW}px`;
+  canvas.style.height = `${cssH}px`;
+  layer.style.width = `${cssW}px`;
+  layer.style.height = `${cssH}px`;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("no 2d context");
+  canvas.style.visibility = "hidden";
+  const renderTask = page.render({ canvas, canvasContext: ctx, viewport, transform: ratio !== 1 ? [ratio, 0, 0, ratio, 0, 0] : undefined });
+  await renderTask.promise;
+  canvas.style.visibility = "visible";
+
+  // Build the text layer.
+  layer.innerHTML = "";
+  const content = await page.getTextContent();
+  // Reusable off-screen ctx to measure each item's natural width (for
+  // per-item horizontal scaling, exactly like pdf.js's TextLayer).
+  const measureCtx = document.createElement("canvas").getContext("2d")!;
+  const pageW = viewport.width;
+  const pageH = viewport.height;
+  let str = "";
+  const append = (text: string) => {
+    str += text;
+  };
+
+  for (const item of content.items) {
+    if (!("str" in item)) continue; // skip marked-content
+    const it = item as PdfTextItem;
+    // transform is the item matrix in *viewport* units? No — it's in the
+    // page's own coordinate space; the page transform (viewport = scale *
+    // base) scales it. pdf.js applies `this.#transform` (the page→viewport
+    // transform). Compute it from the viewport.
+    const t = it.transform as number[];
+    // Item matrix is in page units; the page→viewport transform for scale
+    // `s` scales it (viewport = s × base). Compose: [a,b,c,d,e,f] → px.
+    const s = scale;
+    const a = (t[0] ?? 0) * s;
+    const b = (t[1] ?? 0) * s;
+    const d = (t[3] ?? 0) * s;
+    const e = (t[4] ?? 0) * s;
+    const f = (t[5] ?? 0) * s;
+    const angle = Math.atan2(b, a);
+    // pdf.js: fontHeight = Math.hypot(tx[2], tx[3]) of the composed
+    // (page × item) matrix; for horizontal text tx[2]≈0 so ≈|d| (viewport px).
+    const fh = Math.hypot((t[2] ?? 0) * s, d);
+    const span = document.createElement("span");
+    span.textContent = it.str;
+    span.dir = it.dir;
+    span.style.position = "absolute";
+    span.style.whiteSpace = "pre";
+    span.style.fontFamily = TEXT_LAYER_FONT;
+    span.style.color = "transparent";
+    span.style.cursor = "text";
+    span.style.lineHeight = "1";
+    span.style.fontWeight = "normal";
+    span.style.fontSize = `${fh.toFixed(2)}px`;
+    // left/top: pdf.js uses tx[4], tx[5] (viewport px) minus ascent.
+    let left = e;
+    let top = f;
+    // Ascent: pdf.js multiplies fontHeight by the font's ascent ratio.
+    // We approximate with 0.8 (typical Latin ascent) which aligns closely
+    // enough for overlaying highlights; selection mapping is by DOM offset,
+    // not pixel position, so the exact baseline is not critical.
+    const ascent = fh * 0.8;
+    if (angle === 0) {
+      left = e;
+      top = f - ascent;
+    } else {
+      left = e + ascent * Math.sin(angle);
+      top = f - ascent * Math.cos(angle);
+    }
+    span.style.left = `${(100 * left / pageW).toFixed(3)}%`;
+    span.style.top = `${(100 * top / pageH).toFixed(3)}%`;
+    // Horizontal scale to match the canvas width of this item.
+    if (it.str.length > 1 && it.width > 0 && fh > 0) {
+      measureCtx.font = `${fh}px ${TEXT_LAYER_FONT}`;
+      const natW = measureCtx.measureText(it.str).width;
+      if (natW > 0) {
+        span.style.transformOrigin = "0 0";
+        const sx = (it.width * s) / natW;
+        span.style.transform = `scaleX(${sx.toFixed(4)})`;
+      }
+    }
+    layer.appendChild(span);
+    append(it.str);
+    if (it.hasEOL) {
+      const br = document.createElement("br");
+      layer.appendChild(br);
+      append("\n");
+    }
+  }
+  return str;
+}
+
+function PdfReader({ docId, onBack }: { docId: string; onBack: () => void }) {
+  const qc = useQueryClient();
+  const doc = useQuery({ queryKey: ["doc", docId], queryFn: () => api.getDocument(docId), refetchInterval: 8_000 });
+  const toc = useQuery({
+    queryKey: ["toc", docId],
+    queryFn: () => api.getToc(docId),
+    enabled: doc.data?.ingestState === "ready",
+  });
+  const highlights = useQuery({
+    queryKey: ["highlights", docId],
+    queryFn: () => api.listHighlights(docId),
+    enabled: doc.data?.ingestState === "ready",
+  });
+  const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
+  const layerRef = React.useRef<HTMLDivElement | null>(null);
+  const docRef = React.useRef<PDFDocumentProxy | null>(null);
+  const renderSeq = React.useRef(0);
+  const [docVersion, setDocVersion] = React.useState(0);
+  const [pdfUrl, setPdfUrl] = React.useState<string | null>(null);
+  const [loadError, setLoadError] = React.useState<string | null>(null);
+  const [pageNo, setPageNo] = React.useState(1);
+  const [pageText, setPageText] = React.useState<string | null>(null);
+  const [pendingSel, setPendingSel] = React.useState<{ start: number; end: number; text: string } | null>(null);
+  const restoredRef = React.useRef(false);
+
+  // Fetch the signed URL of the original (pdf.js loads it with range requests).
+  React.useEffect(() => {
+    if (doc.data?.ingestState !== "ready") return;
+    let live = true;
+    api
+      .getDocumentOriginal(docId)
+      .then((r) => {
+        if (live) setPdfUrl(r.url);
+      })
+      .catch((e: Error) => {
+        if (live) setLoadError(e.message);
+      });
+    return () => {
+      live = false;
+    };
+  }, [doc.data?.ingestState, docId]);
+
+  // Open the document (pdf.js) once the signed URL is known. pdf.js v6:
+  // getDocument takes an init object ({url}); teardown is task.destroy().
+  React.useEffect(() => {
+    if (!pdfUrl) return;
+    let live = true;
+    setLoadError(null);
+    const task: PDFDocumentLoadingTask = getDocument({ url: pdfUrl });
+    let doc: PDFDocumentProxy | undefined;
+    task.promise
+      .then((d) => {
+        if (!live) return;
+        doc = d;
+        docRef.current = d;
+        setDocVersion((v) => v + 1);
+      })
+      .catch((e: unknown) => {
+        if (live) setLoadError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      live = false;
+      docRef.current = null;
+      if (doc) void doc.cleanup().catch(() => {});
+      task.destroy().catch(() => {});
+    };
+  }, [pdfUrl]);
+
+  // Progress restore: a pdf locator { page, percent } → open that page.
+  const progress = useQuery({
+    queryKey: ["progress", docId],
+    queryFn: () => api.getProgress(docId),
+    enabled: doc.data?.ingestState === "ready",
+  });
+  React.useEffect(() => {
+    if (restoredRef.current || !progress.data) return;
+    restoredRef.current = true;
+    const loc = progress.data.locator;
+    // Stored 0-based (saveProgress sends n - 1); pageNo is 1-based.
+    if (loc && loc.kind === "pdf" && loc.page > 0) setPageNo(loc.page);
+  }, [progress.data]);
+
+  const total = doc.data?.pageCount ?? 1;
+  const percentFor = React.useCallback(
+    (n: number) => Math.min(1, n / Math.max(1, total)),
+    [total],
+  );
+
+  const saveProgress = React.useCallback(
+    async (n: number) => {
+      const locator = { kind: "pdf" as const, page: n - 1, percent: percentFor(n) };
+      const updatedAt = new Date().toISOString();
+      try {
+        await api.putProgress(docId, { locator, updatedAt });
+        void qc.setQueryData(["progress", docId], { locator, updatedAt });
+      } catch {
+        void qc.invalidateQueries({ queryKey: ["progress", docId] });
+      }
+    },
+    [docId, percentFor, qc],
+  );
+
+  // Render the current page (canvas + text layer); save progress on change.
+  React.useEffect(() => {
+    const d = docRef.current;
+    const canvas = canvasRef.current;
+    const layer = layerRef.current;
+    if (!d || !canvas || !layer) return;
+    let live = true;
+    const seq = ++renderSeq.current;
+    (async () => {
+      try {
+        const p = Math.min(Math.max(1, pageNo), Math.max(1, d.numPages));
+        const text = await renderPdfPage(d, p, canvas, layer, 1.4);
+        if (!live || seq !== renderSeq.current) return;
+        setPageText(text);
+        void saveProgress(p);
+      } catch (e) {
+        if (live && seq === renderSeq.current) setLoadError(e instanceof Error ? e.message : String(e));
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [pdfUrl, pageNo, docVersion, saveProgress, doc.data?.ingestState]);
+
+  // Re-render stored highlights for the current page: resolve each pdf
+  // anchor against this page's text-layer string, wrap the range in <mark>.
+  React.useEffect(() => {
+    const root = layerRef.current;
+    if (!root || pageText === null) return;
+    const marks: PdfPlacedMark[] = [];
+    for (const h of highlights.data?.items ?? []) {
+      if (h.anchor.kind !== "pdf" || h.anchor.page !== pageNo) continue;
+      const res = resolvePdfAnchor(h.anchor, pageText);
+      if (res.status !== "resolved") continue; // orphaned: listed, not drawn
+      marks.push({ hlId: h.id, color: h.color, note: h.note, start: res.start, end: res.end });
+    }
+    if (marks.length > 0) placePdfMarks(root, marks);
+  }, [highlights.data, pageNo, pageText]);
+
+  // A selection released inside the text layer → floating save bar. Offsets
+  // are in the page's text-layer string (SPECS §7: the anchor's coordinate).
+  const onMouseUp = React.useCallback(() => {
+    const root = layerRef.current;
+    if (!root || pageText === null) return;
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
+      if (sel) sel.removeAllRanges();
+      return;
+    }
+    const range = sel.getRangeAt(0);
+    if (!root.contains(range.commonAncestorContainer)) {
+      sel.removeAllRanges();
+      return;
+    }
+    const segs = collectTextNodes(root);
+    const a = pointToLayerString(range.startContainer, range.startOffset, false, segs);
+    const b = pointToLayerString(range.endContainer, range.endOffset, true, segs);
+    if (a === null || b === null) return;
+    let start = Math.min(a, b);
+    let end = Math.max(a, b);
+    while (start < end && pageText[start] === "\n") start++;
+    while (end > start && pageText[end - 1] === "\n") end--;
+    if (end <= start) {
+      sel.removeAllRanges();
+      return;
+    }
+    setPendingSel({ start, end, text: pageText.slice(start, end) });
+  }, [pageText]);
+
+  const createHighlight = useMutation({
+    mutationFn: (body: PostHighlightBody) => api.createHighlight(body),
+    onSuccess: () => {
+      setPendingSel(null);
+      window.getSelection()?.removeAllRanges();
+      void qc.invalidateQueries({ queryKey: ["highlights", docId] });
+    },
+  });
+  const patchHighlight = useMutation({
+    mutationFn: (a: { id: string; body: PatchHighlightBody }) => api.patchHighlight(a.id, a.body),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["highlights", docId] }),
+  });
+  const deleteHighlight = useMutation({
+    mutationFn: (id: string) => api.deleteHighlight(id),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["highlights", docId] }),
+  });
+
+  const [showHighlights, setShowHighlights] = React.useState(false);
+
+  const d = doc.data;
+  if (doc.isError) return <ErrorBox message={String(doc.error)} onBack={onBack} />;
+  if (!d) return <p data-testid="reader-loading">Loading…</p>;
+  if (d.ingestState === "failed")
+    return (
+      <div>
+        <BackBar onBack={onBack} title={d.title} />
+        <p style={{ color: "crimson" }}>Couldn't process this PDF: {d.ingestError ?? "unknown error"}</p>
+      </div>
+    );
+  if (d.ingestState !== "ready")
+    return (
+      <div>
+        <BackBar onBack={onBack} title={d.title} />
+        <p data-testid="processing">Processing your PDF… this usually takes a few seconds.</p>
+      </div>
+    );
+
+  const goPage = (n: number) => setPageNo(Math.min(Math.max(1, n), Math.max(1, total)));
+
+  return (
+    <div data-testid="reader" style={{ background: "#f2f2f2", borderRadius: 12, padding: 16 }}>
+      <BackBar onBack={onBack} title={d.title} onHighlights={() => setShowHighlights(true)} />
+      <h1 style={{ margin: "0 0 4px", fontSize: 20 }}>{d.title}</h1>
+      {d.pageCount ? (
+        <p style={{ opacity: 0.5, fontSize: 13, margin: 0 }} data-testid="pdf-page-count">
+          {d.pageCount} pages
+        </p>
+      ) : null}
+      {d.pdfHasText === false ? (
+        <p
+          data-testid="pdf-no-text"
+          style={{
+            margin: "8px 0 0",
+            padding: "10px 12px",
+            background: "#fff8e1",
+            border: "1px solid #ffe082",
+            borderRadius: 8,
+            fontSize: 14,
+          }}
+        >
+          This PDF has no text layer (it looks scanned), so highlights are disabled. You can still
+          page through it below.
+        </p>
+      ) : null}
+      {toc.data?.items.length ? (
+        <details data-testid="toc" style={{ marginTop: 8 }} open>
+          <summary style={{ cursor: "pointer", fontSize: 14 }}>Contents</summary>
+          <PdfTocTree
+            entries={toc.data.items}
+            onPick={(page) => {
+              if (page) goPage(page);
+            }}
+          />
+        </details>
+      ) : null}
+
+      <div
+        data-testid="pdf-page"
+        style={{ position: "relative", margin: "16px auto", width: "fit-content", boxShadow: "0 2px 12px #0003" }}
+      >
+        <canvas
+          data-testid="pdf-canvas"
+          ref={canvasRef}
+          style={{ display: "block", background: "#fff" }}
+        />
+        <div
+          data-testid="pdf-text-layer"
+          className="textLayer"
+          onMouseUp={onMouseUp}
+          // Overlay the canvas (spans inside are absolutely positioned by
+          // renderPdfPage; the parent .pdf-page is position:relative).
+          style={{ position: "absolute", inset: 0, overflow: "hidden", cursor: "text" }}
+          ref={layerRef}
+        />
+      </div>
+      {loadError ? (
+        <p style={{ color: "crimson", margin: "12px 0 0" }} data-testid="pdf-error">
+          {loadError}
+        </p>
+      ) : null}
+
+      {pendingSel ? (
+        <div
+          data-testid="save-highlight-bar"
+          style={{
+            position: "sticky",
+            bottom: 8,
+            margin: "12px 0 0",
+            display: "flex",
+            gap: 8,
+            alignItems: "center",
+            padding: "8px 12px",
+            background: "rgba(0,0,0,0.75)",
+            color: "#fff",
+            borderRadius: 10,
+            fontSize: 14,
+          }}
+        >
+          <span data-testid="save-highlight-preview" style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            “{pendingSel.text.slice(0, 80)}{pendingSel.text.length > 80 ? "…" : ""}”
+          </span>
+          <button
+            data-testid="save-highlight-btn"
+            disabled={createHighlight.isPending}
+            onClick={() => {
+              const anchor = buildPdfAnchor(pageNo, { start: pendingSel.start, end: pendingSel.end }, pageText!);
+              createHighlight.mutate({ documentId: docId, anchor, exact: anchor.exact, color: null, note: null });
+            }}
+          >
+            {createHighlight.isPending ? "Saving…" : "Highlight"}
+          </button>
+          <button data-testid="cancel-highlight-btn" onClick={() => setPendingSel(null)}>
+            Cancel
+          </button>
+        </div>
+      ) : null}
+
+      {showHighlights ? (
+        <HighlightsPanel
+          docId={docId}
+          items={highlights.data?.items ?? []}
+          onClose={() => setShowHighlights(false)}
+          onColor={(id, color) => patchHighlight.mutate({ id, body: { color } })}
+          onNote={(id, note) => patchHighlight.mutate({ id, body: { note } })}
+          onDelete={(id) => deleteHighlight.mutate(id)}
+          deleting={deleteHighlight.isPending}
+        />
+      ) : null}
+
+      <Pager
+        prevId={pageNo > 1 ? "prev" : null}
+        nextId={pageNo < total ? "next" : null}
+        onNav={(dir) => goPage(dir === "prev" ? pageNo - 1 : pageNo + 1)}
+        middle={
+          <span data-testid="pdf-page-indicator" style={{ fontSize: 14 }}>
+            Page {pageNo} / {total}
+          </span>
+        }
+      />
+    </div>
+  );
+}
+
+/** The PDF outline (toc_entries with page destinations) as a clickable tree. */
+function PdfTocTree({ entries, onPick }: { entries: TocEntryDto[]; onPick: (page: number) => void }) {
+  const byParent = React.useMemo(() => {
+    const ids = new Set(entries.map((e) => e.id));
+    const map = new Map<string | null, TocEntryDto[]>();
+    for (const e of entries) {
+      const key = e.parentId && ids.has(e.parentId) ? e.parentId : null;
+      const arr = map.get(key) ?? [];
+      arr.push(e);
+      map.set(key, arr);
+    }
+    return map;
+  }, [entries]);
+
+  const render = (parentId: string | null): React.ReactNode => {
+    const kids = byParent.get(parentId) ?? [];
+    if (!kids.length) return null;
+    return (
+      <ul style={{ margin: "4px 0", paddingLeft: 18, fontSize: 14 }}>
+        {kids.map((t) => (
+          <li key={t.id} style={{ marginBottom: 2 }}>
+            {t.page ? (
+              <a
+                href="#pdf-page"
+                data-testid="toc-page-link"
+                onClick={(e) => {
+                  e.preventDefault();
+                  onPick(t.page!);
+                }}
+              >
+                {t.label}
+              </a>
+            ) : (
+              <span style={{ opacity: 0.6 }}>{t.label}</span>
+            )}
+            {render(t.id)}
+          </li>
+        ))}
+      </ul>
+    );
+  };
+  return <div>{render(null)}</div>;
+}
+
+function OpenDocView({ docId, onBack }: { docId: string; onBack: () => void }) {
+  // Fetch the document (light) to know which reader to mount: PDFs go to
+  // the faithful pdf.js reader, epub/article to the reflow reader.
+  const doc = useQuery({ queryKey: ["doc", docId], queryFn: () => api.getDocument(docId) });
+  if (doc.isError) return <ErrorBox message={String(doc.error)} onBack={onBack} />;
+  if (!doc.data) return <p data-testid="reader-loading">Loading…</p>;
+  if (doc.data.type === "pdf") return <PdfReader docId={docId} onBack={onBack} />;
+  return <Reader docId={docId} onBack={onBack} />;
+}
+
 function SignedIn() {
   const me = useMe();
   const qc = useQueryClient();
@@ -1275,7 +1982,7 @@ function SignedIn() {
 
   if (me.data) {
     return (
-      <div data-testid="signed-in" style={{ width: "min(720px, 92vw)", margin: "4vh auto", padding: 24 }}>
+      <div data-testid="signed-in" style={{ width: openDoc ? "min(900px, 96vw)" : "min(720px, 92vw)", margin: "4vh auto", padding: 24 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
           <h1 style={{ fontSize: 26, margin: 0 }}>Personal Reader</h1>
           <span id="hello" style={{ opacity: 0.7, fontSize: 14 }}>Hello {me.data.email}</span>
@@ -1285,7 +1992,7 @@ function SignedIn() {
         </div>
         <HealthLine />
         {openDoc ? (
-          <Reader docId={openDoc} onBack={() => setOpenDoc(null)} />
+          <OpenDocView docId={openDoc} onBack={() => setOpenDoc(null)} />
         ) : (
           <Library onOpen={setOpenDoc} />
         )}

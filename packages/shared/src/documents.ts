@@ -24,6 +24,20 @@ export const documentMeta = z.object({
   ingestState,
   ingestError: z.string().nullable(),
   wordCount: z.number().int().nullable(),
+  /**
+   * PDF rendering modes available for this document (SPECS §11); null for
+   * non-PDF documents. Slice 6 sets "faithful" (pdf.js over the original);
+   * "both" is reserved for the reflow mode (slice 9).
+   */
+  pdfModeAvailable: z.enum(["faithful", "both"]).nullable(),
+  /** PDF page count (null when unknown or not a PDF). */
+  pageCount: z.number().int().nullable(),
+  /**
+   * PDF: extractable text layer present (slice 6). Null for non-PDF docs;
+   * `false` = scanned (no text layer) — the reader shows a clear no-text
+   * message and no highlighting (SPECS §2).
+   */
+  pdfHasText: z.boolean().nullable(),
   /** Tag names, alphabetized (SPECS §11; empty when untagged). */
   tags: z.array(z.string()),
   createdAt: z.string(),
@@ -63,6 +77,11 @@ export const tocEntry = z.object({
   parentId: z.string().uuid().nullable(),
   label: z.string(),
   sectionId: z.string().uuid().nullable(),
+  /**
+   * PDF outline target: the 1-based page to open (slice 6). Null for
+   * epub/article entries.
+   */
+  page: z.number().int().nullable(),
 });
 export type TocEntryDto = z.infer<typeof tocEntry>;
 
@@ -124,6 +143,16 @@ export const postUrlResponse = z.object({
   createdAt: z.string(),
 });
 export type PostUrlResponse = z.infer<typeof postUrlResponse>;
+
+/**
+ * GET /v1/documents/:id/original — the signed, range-capable URL of the
+ * original upload (SPECS §12). pdf.js loads the PDF through it (slice 6).
+ */
+export const documentOriginalResponse = z.object({
+  url: z.string(),
+  pageCount: z.number().int().nullable(),
+});
+export type DocumentOriginalResponse = z.infer<typeof documentOriginalResponse>;
 
 /** PATCH /v1/documents/:id — partial update; omit = unchanged, null = clear. */
 export const patchDocumentBody = z.object({

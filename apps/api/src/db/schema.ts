@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import { pgSchema } from "drizzle-orm/pg-core";
-import { customType, index, integer, jsonb, primaryKey, text, timestamp, uniqueIndex, uuid, varchar } from "drizzle-orm/pg-core";
-import type { Locator, ReaderPrefs, ReflowAnchor } from "@reader/shared";
+import { boolean, customType, index, integer, jsonb, primaryKey, text, timestamp, uniqueIndex, uuid, varchar } from "drizzle-orm/pg-core";
+import type { HighlightAnchor, Locator, ReaderPrefs } from "@reader/shared";
 
 /** tsvector column (SPECS §9: only the tsvector of section text is stored). */
 export const tsvector = customType<{ data: string }>({
@@ -92,6 +92,17 @@ export const documents = app.table(
     parserVersion: integer("parser_version").notNull().default(1),
     ingestState: text("ingest_state").$type<"pending" | "processing" | "ready" | "failed">().notNull().default("pending"),
     ingestError: text("ingest_error"),
+    /** PDF rendering modes (SPECS §11); null for non-PDF documents. */
+    pdfModeAvailable: text("pdf_mode_available").$type<"faithful" | "both">(),
+    /** PDF page count (slice 6); null when unknown or not a PDF. */
+    pageCount: integer("page_count"),
+    /**
+     * PDF: does the document carry an extractable text layer (slice 6)?
+     * Null for non-PDF documents. A `false` value is a scanned PDF — the
+     * reader shows a clear no-text message and disables highlighting
+     * (SPECS §2 "scanned PDFs get a clear message").
+     */
+    pdfHasText: boolean("pdf_has_text"),
     wordCount: integer("word_count"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -129,6 +140,8 @@ export const tocEntries = app.table(
     idx: integer("idx").notNull(),
     label: text("label").notNull(),
     sectionId: uuid("section_id").references(() => sections.id, { onDelete: "set null" }),
+    /** PDF outline destination: 1-based page (slice 6); null for epub/article. */
+    page: integer("page"),
     anchor: text("anchor"),
   },
   (t) => [index("toc_document_idx").on(t.documentId)],
@@ -201,7 +214,7 @@ export const highlights = app.table(
     userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
     documentId: uuid("document_id").notNull().references(() => documents.id, { onDelete: "cascade" }),
     /** SPECS §7 anchor (reflow/pdf), stored as jsonb. */
-    anchor: jsonb("anchor").$type<ReflowAnchor>().notNull(),
+    anchor: jsonb("anchor").$type<HighlightAnchor>().notNull(),
     /** Canonical text of the selection (SPECS §7 `exact`). */
     exact: text("exact").notNull(),
     color: text("color").$type<"yellow" | "green" | "blue" | "pink">(),

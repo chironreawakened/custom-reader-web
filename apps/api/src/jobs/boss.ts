@@ -8,6 +8,7 @@ import type { AppConfig } from "../config.js";
 
 export const JOB_EPUB_PROCESS = "epub.process";
 export const JOB_ARTICLE_PROCESS = "article.process";
+export const JOB_PDF_PROCESS = "pdf.process";
 export const JOB_BACKUP_NIGHTLY = "backup.nightly";
 
 export interface EpubProcessJob {
@@ -15,6 +16,10 @@ export interface EpubProcessJob {
 }
 
 export interface ArticleProcessJob {
+  documentId: string;
+}
+
+export interface PdfProcessJob {
   documentId: string;
 }
 

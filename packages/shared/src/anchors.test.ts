@@ -2,11 +2,15 @@ import { describe, expect, it } from "vitest";
 import {
   ANCHOR_CONTEXT_CHARS,
   FUZZY_THRESHOLD,
+  buildPdfAnchor,
   buildReflowAnchor,
   formatHighlightMarkdown,
+  highlightAnchor,
   highlightColor,
+  pdfAnchor,
   reflowAnchor,
   resolveAnchor,
+  resolvePdfAnchor,
   type ReflowAnchor,
 } from "./anchors.js";
 import { canonicalText } from "./canonical-text.js";
@@ -217,5 +221,57 @@ describe("anchors (SPECS §7)", () => {
     expect(ANCHOR_CONTEXT_CHARS).toBe(32);
     expect(FUZZY_THRESHOLD).toBe(0.3);
     expect(highlightColor.options).toEqual(["yellow", "green", "blue", "pink"]);
+  });
+
+  describe("pdf anchors (slice 6, SPECS §7)", () => {
+    const PAGE_TEXT = "The lamp was his only clock. Each dawn the keeper walked the spiral stair and fed the flame.";
+
+    it("buildPdfAnchor: captures page, exact text and ≤32-char contexts", () => {
+      const pos = PAGE_TEXT.indexOf("keeper walked the spiral");
+      const a = buildPdfAnchor(3, { start: pos, end: pos + "keeper walked the spiral".length }, PAGE_TEXT);
+      expect(a).toMatchObject({ kind: "pdf", v: 1, page: 3, exact: "keeper walked the spiral" });
+      expect(a.prefix).toBe("s his only clock. Each dawn the ");
+      expect(a.suffix).toBe(" stair and fed the flame.");
+      expect(a.offsetHint).toBe(pos);
+      expect(pdfAnchor.parse(a)).toEqual(a);
+    });
+
+    it("buildPdfAnchor: clamps contexts at the page text edges", () => {
+      const atEnd = buildPdfAnchor(1, { start: PAGE_TEXT.length - 6, end: PAGE_TEXT.length }, PAGE_TEXT);
+      expect(atEnd.suffix).toBe("");
+      const atStart = buildPdfAnchor(1, { start: 0, end: 8 }, PAGE_TEXT);
+      expect(atStart.prefix).toBe("");
+    });
+
+    it("buildPdfAnchor: rejects empty, out-of-range and invalid pages", () => {
+      expect(() => buildPdfAnchor(0, { start: 0, end: 4 }, PAGE_TEXT)).toThrow(/page/);
+      expect(() => buildPdfAnchor(2.5, { start: 0, end: 4 }, PAGE_TEXT)).toThrow(/page/);
+      expect(() => buildPdfAnchor(1, { start: 5, end: 5 }, PAGE_TEXT)).toThrow(/empty or out-of-range/);
+      expect(() => buildPdfAnchor(1, { start: 5, end: 4 }, PAGE_TEXT)).toThrow(/empty or out-of-range/);
+      expect(() => buildPdfAnchor(1, { start: 0, end: PAGE_TEXT.length + 1 }, PAGE_TEXT)).toThrow(/empty or out-of-range/);
+    });
+
+    it("resolvePdfAnchor: exact match with context on the page text", () => {
+      const pos = PAGE_TEXT.indexOf("keeper walked the spiral");
+      const a = buildPdfAnchor(3, { start: pos, end: pos + 24 }, PAGE_TEXT);
+      expect(resolvePdfAnchor(a, PAGE_TEXT)).toEqual({ status: "resolved", start: pos, end: pos + 24 });
+    });
+
+    it("resolvePdfAnchor: edited page degrades to fuzzy, then orphaned", () => {
+      const pos = PAGE_TEXT.indexOf("keeper walked the spiral");
+      const a = buildPdfAnchor(3, { start: pos, end: pos + 24 }, PAGE_TEXT);
+      const edited = PAGE_TEXT.replace("keeper walked the spiral", "keeper walked the spirals");
+      expect(resolvePdfAnchor(a, edited).status).toBe("resolved");
+      expect(resolvePdfAnchor(a, "A totally different page with nothing alike at all.")).toEqual({ status: "orphaned" });
+    });
+
+    it("highlightAnchor discriminator accepts both kinds", () => {
+      const pos = PAGE_TEXT.indexOf("clock");
+      const pdfA = buildPdfAnchor(2, { start: pos, end: pos + 5 }, PAGE_TEXT);
+      const reflowA = buildReflowAnchor(SID, { start: 0, end: 8 }, FIX);
+      expect(highlightAnchor.parse(pdfA).kind).toBe("pdf");
+      expect(highlightAnchor.parse(reflowA).kind).toBe("reflow");
+      expect(() => highlightAnchor.parse({ ...reflowA, kind: "pdf" })).toThrow();
+    });
   });
 });

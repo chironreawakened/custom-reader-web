@@ -20,10 +20,19 @@ import { assets, backups, documents, sections, users, tocEntries } from "./db/sc
 import { createS3Storage } from "./storage/s3.js";
 import { createObjectStore } from "./storage/object-store.js";
 import { EpubError, PARSER_VERSION, parseEpub } from "./services/epub/parse-epub.js";
+import { PDF_PARSER_VERSION, PdfError, parsePdf } from "./services/pdf/parse-pdf.js";
 import { ARTICLE_PARSER_VERSION, ArticleError, extractArticle } from "./services/article/extract.js";
 import { safeFetch, SsrfError } from "./services/ssrf/safe-fetch.js";
 import { imageSize, mimeByPath } from "./services/epub/image-size.js";
-import { JOB_ARTICLE_PROCESS, JOB_BACKUP_NIGHTLY, JOB_EPUB_PROCESS, type ArticleProcessJob, type EpubProcessJob } from "./jobs/boss.js";
+import {
+  JOB_ARTICLE_PROCESS,
+  JOB_BACKUP_NIGHTLY,
+  JOB_EPUB_PROCESS,
+  JOB_PDF_PROCESS,
+  type ArticleProcessJob,
+  type EpubProcessJob,
+  type PdfProcessJob,
+} from "./jobs/boss.js";
 import { backupKindFor } from "./jobs/backup-schedule.js";
 
 const pExecFile = promisify(execFile);
@@ -316,6 +325,105 @@ async function processArticle(docId: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// pdf.process (slice 6: PDF faithful mode)
+// ---------------------------------------------------------------------------
+
+/**
+ * PDF faithful ingest: the original bytes are already stored (the upload
+ * streamed them), so this job only opens the PDF to read its outline, page
+ * count and metadata, records an `original` asset (so the signed-URL route
+ * can serve it) and flips the document to ready.
+ *
+ * The browser renders the original through pdf.js (range requests) — the
+ * worker never rasterizes. Scanned PDFs (no text layer) are ready but
+ * carry no text: the reader disables highlighting for them (SPECS §2).
+ */
+async function processPdf(docId: string): Promise<void> {
+  const doc = await claimDocument(docId);
+  if (!doc) {
+    // eslint-disable-next-line no-console
+    console.log(`[worker] ${docId}: nothing to do (already processed or gone)`);
+    return;
+  }
+  if (doc.type !== "pdf") {
+    // An epub row queued as pdf (re-queue, manual test) — route it home.
+    await processEpub(docId);
+    return;
+  }
+  if (!doc.originalObjectId) {
+    await markFailed(docId, "original upload object is missing");
+    return;
+  }
+
+  const pdfBuffer = await objectStore.get(doc.originalObjectId);
+
+  let parsed;
+  try {
+    parsed = await parsePdf(pdfBuffer);
+  } catch (e) {
+    await markFailed(docId, e instanceof PdfError ? e.message : "pdf parsing failed");
+    return;
+  }
+
+  // 1. The `original` asset: the signed-URL route signs BY ASSET, so the
+  //    pdf.js URL hangs off this row (same storage object as the upload).
+  const assetId = crypto.randomUUID();
+  await db.insert(assets).values({
+    id: assetId,
+    userId: doc.userId,
+    documentId: docId,
+    objectId: doc.originalObjectId,
+    role: "original",
+    mime: "application/pdf",
+    width: null,
+    height: null,
+  });
+
+  // 2. The PDF outline IS the TOC (SPECS §2): toc_entries with page
+  //    destinations (sectionId stays null).
+  if (parsed.outline.length > 0) {
+    const ids = new Map<number, string>();
+    for (const e of parsed.outline) ids.set(e.idx, crypto.randomUUID());
+    await db.insert(tocEntries).values(
+      parsed.outline.map((e) => ({
+        id: ids.get(e.idx)!,
+        userId: doc.userId,
+        documentId: docId,
+        parentId: e.parentId != null ? (ids.get(e.parentId) ?? null) : null,
+        idx: e.idx,
+        label: e.label,
+        sectionId: null,
+        page: e.page,
+        anchor: null,
+      })),
+    );
+  }
+
+  // 3. Finalize the document row. `pdfHasText` is the scanned flag the
+  //    reader needs: false => no text layer => clear message, no
+  //    highlighting (SPECS §2).
+  await db
+    .update(documents)
+    .set({
+      title: parsed.title || doc.title,
+      author: parsed.author,
+      parserVersion: PDF_PARSER_VERSION,
+      ingestState: "ready",
+      pageCount: parsed.pageCount,
+      pdfModeAvailable: "faithful",
+      pdfHasText: parsed.hasText,
+      wordCount: parsed.wordCount,
+      updatedAt: new Date(),
+    })
+    .where(eq(documents.id, docId));
+
+  // eslint-disable-next-line no-console
+  console.log(
+    `[worker] ${docId}: ready (pdf, ${parsed.pageCount} pages, ${parsed.outline.length} outline entries, ${parsed.hasText ? "text layer" : "NO text layer"})`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // backup.nightly
 // ---------------------------------------------------------------------------
 
@@ -442,6 +550,34 @@ await boss.work<ArticleProcessJob>(
   },
 );
 
+// PDF ingest (slice 6). A failed parse (corrupt file, password) is terminal
+// — retrying the same bytes won't help — so no retries.
+await boss.createQueue(JOB_PDF_PROCESS, {
+  name: JOB_PDF_PROCESS,
+  expireInSeconds: 3600,
+  retryLimit: 2,
+  retryDelay: 60,
+  retryBackoff: true,
+  retentionSeconds: 7 * 24 * 3600,
+});
+await boss.work<PdfProcessJob>(
+  JOB_PDF_PROCESS,
+  {
+    batchSize: 1,
+  },
+  async (jobs) => {
+    for (const job of jobs) {
+      try {
+        await processPdf(job.data.documentId);
+      } catch (err) {
+        const docId = (job.data as { documentId?: string }).documentId ?? "unknown";
+        await markFailed(docId, "worker crashed: " + String(err)).catch(() => {});
+        throw err;
+      }
+    }
+  },
+);
+
 await boss.createQueue(JOB_BACKUP_NIGHTLY, {
   name: JOB_BACKUP_NIGHTLY,
   expireInSeconds: 3600,
@@ -462,4 +598,4 @@ await boss.work(
 await boss.schedule(JOB_BACKUP_NIGHTLY, BACKUP_CRON, {}, { tz: "Europe/Helsinki" });
 
 // eslint-disable-next-line no-console
-console.log("[worker] started: epub.process + backup.nightly");
+console.log("[worker] started: epub.process + article.process + pdf.process + backup.nightly");
