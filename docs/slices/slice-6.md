@@ -126,6 +126,14 @@ Local stack: `e2e-postgres-1` + `s3mock` (compose `docker-compose.local-verify.y
 
 ## Known gaps / follow-ups
 
+- **Node 24 / `Uint8Array.prototype.toHex`** (found via CI): pdfjs-dist 6.x
+  worker code calls `toHex()`, which only exists natively in Node ≥ 25.
+  Local dev runs Node 26 (invisible), CI and the prod images run
+  `node:24-alpine` (breaks — first CI run failed with
+  `hashOriginal.toHex is not a function` even though e2e passed locally).
+  `parse-pdf.ts` now patches `toHex` when missing, so Node 24 works without
+  touching the prod images. If the images move to Node 26+ the guard is a
+  no-op.
 - **Reflow mode is slice 9** — `pdfModeAvailable` is hard-set to
   `"faithful"`; the shared types already reserve `"both"`.
 - Scanned PDFs: no OCR (explicitly out of scope, SPECS §2) — they open and

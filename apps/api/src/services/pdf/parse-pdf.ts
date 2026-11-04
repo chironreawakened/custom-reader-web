@@ -17,6 +17,26 @@
 import { getDocument } from "pdfjs-dist";
 import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist";
 
+// pdfjs-dist 6.x worker code calls `Uint8Array.prototype.toHex()`. That
+// method is native in Node >= 25 and modern browsers, but NOT in Node 24
+// (CI + the prod images run node:24-alpine). pdf.js's own bundle ships a
+// shim for it, but it lives in a lazy module that is not loaded on the
+// open() path, so `getDocument` dies with "hashOriginal.toHex is not a
+// function". Patch it up front — only when missing, so newer runtimes keep
+// the native implementation. (TS's lib predates the method, hence the cast.)
+const u8Proto = Uint8Array.prototype as unknown as { toHex?: () => string };
+if (typeof u8Proto.toHex !== "function") {
+  u8Proto.toHex = function toHex() {
+    const self = this as Uint8Array;
+    let s = "";
+    for (let i = 0; i < self.length; i++) {
+      const b = self[i] ?? 0;
+      s += b.toString(16).padStart(2, "0");
+    }
+    return s;
+  };
+}
+
 export const PDF_PARSER_VERSION = 1;
 
 /** Parsed outline entry, ready for toc_entries. */
