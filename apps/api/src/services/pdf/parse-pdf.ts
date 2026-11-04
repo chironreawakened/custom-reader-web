@@ -13,9 +13,37 @@
  * to the package's own pdf.mjs) points at the real pdf.worker.mjs. node_modules
  * ships with the image (the build tree is copied wholesale; the other
  * externals depend on it too).
+ *
+ * The `legacy` subpath is the one that must be used on Node: the regular
+ * build's transport calls `WeakMap.prototype.getOrInsertComputed`
+ * (Node >= 26 only — `getDocument(...).getMetadata()` dies with
+ * "getOrInsertComputed is not a function" on Node 24, which is what CI and
+ * the prod images run). The legacy build also silences pdf.js's own
+ * "Please use the legacy build in Node.js environments" warning.
  */
-import { getDocument } from "pdfjs-dist";
+import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist";
+import { createRequire } from "node:module";
+import path from "node:path";
+import { existsSync } from "node:fs";
+
+// Worker-only module (Node). pdf.js needs the standard-14 font data to map
+// glyphs → unicode correctly for documents written against the standard 14
+// without embedded fonts (common for generated/simple PDFs). The directory
+// ships with the pdfjs-dist package; resolve it via the package's own
+// package.json (a bare directory is not require-resolvable). import.meta.url
+// is the bundled worker's own URL, so resolution is stable from dist/ and
+// from source alike.
+const nodeRequire = createRequire(import.meta.url);
+const pkgJson = nodeRequire.resolve("pdfjs-dist/package.json");
+const standardFontsUrl = path.join(path.dirname(pkgJson), "standard_fonts") + "/";
+if (!existsSync(standardFontsUrl)) {
+  // Non-fatal: pdf.js falls back (with a warning) to no standard fonts, which
+  // only affects glyph→unicode mapping for standard-14, non-embedded docs.
+  console.warn(
+    `[pdf] standard font data not found at ${standardFontsUrl}; text probe may under-count`,
+  );
+}
 
 // pdfjs-dist 6.x worker code calls `Uint8Array.prototype.toHex()`. That
 // method is native in Node >= 25 and modern browsers, but NOT in Node 24
@@ -73,7 +101,10 @@ export class PdfError extends Error {
 export async function parsePdf(buffer: Uint8Array): Promise<PdfParseResult> {
   let doc;
   try {
-    doc = await getDocument({ data: buffer }).promise;
+    doc = await getDocument({
+      data: buffer,
+      standardFontDataUrl: standardFontsUrl,
+    }).promise;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (/password/i.test(msg) || (e as { name?: string }).name === "PasswordException") {

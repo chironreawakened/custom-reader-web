@@ -9,17 +9,31 @@ corpus: PDFs with outline, without outline, and scanned.
 - **Fixture generator** (`apps/api/tools/make-fixture-pdf.mjs`, no deps —
   hand-assembled PDF 1.4): three variants, all verified through the real
   `parsePdf` —
-  - `--outline` (2 pages, 2-entry outline with named destinations),
-  - `--plain` (2 pages, no outline),
-  - `--scanned` (1 page, image XObject only — no text layer).
+  - `outline` (default; 2 pages of text, 2-entry outline with page
+    destinations, `/Title` + `/Author`, byte-stable so e2e assertions never
+    drift),
+  - `plain` (2 pages of text, no outline),
+  - `scanned` (1 page, image XObject only — no text layer).
   Generated in `beforeAll` in CI/local — no binary in the repo.
 
 - **PDF parser** (`apps/api/src/services/pdf/parse-pdf.ts`): pure logic on
-  `pdfjs-dist/legacy` — title/author from the info dict, per-page text
-  extraction using the shared `pdfPageText` rule (word-join per line,
-  newline-joined lines), outline walk with destination→page resolution, and a
-  `hasText` probe (false for scanned files). `PDF_PARSER_VERSION = 1` stamped
-  on the doc.
+  `pdfjs-dist/legacy/build/pdf.mjs` — title/author from the info dict,
+  `pageCount`, outline walk with destination→page resolution (→ TOC), and a
+  `hasText` probe sampling up to 5 pages (false for scanned files).
+  `standardFontDataUrl` points at the package's `standard_fonts/` dir so
+  standard-14, non-embedded PDFs extract correct unicode. `PDF_PARSER_VERSION
+  = 1` stamped on the doc. Three Node-24 incompatibilities in pdfjs-dist 6.x
+  had to be handled (local Node 26 hid them; CI/prod run `node:24-alpine`):
+  1. **`WeakMap.prototype.getOrInsertComputed`** — the *regular* build's
+     worker transport uses it (Node ≥ 26 only), so `getMetadata()` threw
+     `getOrInsertComputed is not a function`. Fix: import the **legacy**
+     build (the Node-appropriate one — it also removes pdf.js's
+     "Please use the legacy build" warning).
+  2. **`Uint8Array.prototype.toHex`** — called in the open() path
+     (`hashOriginal.toHex`); native only in Node ≥ 25. `parse-pdf.ts`
+     patches it when missing (no-op on newer runtimes).
+  3. **standard font data** — without `standardFontDataUrl` the text probe
+     warns and under-counts words for non-embedded standard-14 docs.
 
 - **Worker** (`apps/api/src/worker.ts`, `jobs/boss.ts`): new boss job
   `pdf.process`. On claim it reads the **original** file back from the object
@@ -97,6 +111,11 @@ Local stack: `e2e-postgres-1` + `s3mock` (compose `docker-compose.local-verify.y
 - **Live e2e (Playwright, real Chromium): 4/4 passed (56s)** — the renamed
   `documents: upload + read book, article, and PDF (faithful)` test covers
   book, article, **and** the full PDF path above in one serial session.
+- **Node-24 container repro** (the CI/prod runtime): built `dist/` run in a
+  `node:24-alpine` container against the same compose stack + s3mock —
+  upload outline PDF → `ready (pdf, 2 pages, 2 outline entries, text layer)`;
+  scanned fixture → `textChars=0, outline=null` (probe correctly reports no
+  text); no `standardFontDataUrl` / legacy-build warnings.
 - Live curl loop (session cookie from the console mailbox):
   - Upload of all three fixture variants → all `ingestState=ready` within
     seconds: outline = 2 pages / 2-entry TOC / `pdfHasText=true`;
@@ -126,14 +145,17 @@ Local stack: `e2e-postgres-1` + `s3mock` (compose `docker-compose.local-verify.y
 
 ## Known gaps / follow-ups
 
-- **Node 24 / `Uint8Array.prototype.toHex`** (found via CI): pdfjs-dist 6.x
-  worker code calls `toHex()`, which only exists natively in Node ≥ 25.
-  Local dev runs Node 26 (invisible), CI and the prod images run
-  `node:24-alpine` (breaks — first CI run failed with
-  `hashOriginal.toHex is not a function` even though e2e passed locally).
-  `parse-pdf.ts` now patches `toHex` when missing, so Node 24 works without
-  touching the prod images. If the images move to Node 26+ the guard is a
-  no-op.
+- **Node 24 vs local Node 26** (the slice's main gotcha, found via CI): local
+  dev runs Node 26, but CI and both prod Dockerfiles run `node:24-alpine`.
+  pdfjs-dist 6.x's *regular* build uses `WeakMap.prototype.getOrInsertComputed`
+  (Node ≥ 26), so `getDocument(...).getMetadata()` threw
+  `getOrInsertComputed is not a function` on Node 24 — the local suite passed
+  while CI's e2e failed. Switched the worker to the **legacy** build, which is
+  the Node-appropriate variant (and removes pdf.js's own warning). `toHex` and
+  `standardFontDataUrl` covered the rest. **Precedent: a runtime that works on
+  the dev box can still break CI/prod on a lower Node major** — simulate by
+  running the built `dist/` in a `node:24-alpine` container before shipping
+  anything that touches a new dependency's runtime APIs.
 - **Reflow mode is slice 9** — `pdfModeAvailable` is hard-set to
   `"faithful"`; the shared types already reserve `"both"`.
 - Scanned PDFs: no OCR (explicitly out of scope, SPECS §2) — they open and

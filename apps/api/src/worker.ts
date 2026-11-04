@@ -361,6 +361,12 @@ async function processPdf(docId: string): Promise<void> {
   try {
     parsed = await parsePdf(pdfBuffer);
   } catch (e) {
+    // Log the stack: without it, non-PdfError messages come back empty and
+    // the failure is undiagnosable from CI (this is how the Node-24 toHex
+    // regression was finally pinpointed).
+    console.error(
+      `[worker] ${docId}: pdf parse error: ${e instanceof Error ? e.stack : String(e)}`,
+    );
     await markFailed(docId, e instanceof PdfError ? e.message : "pdf parsing failed");
     return;
   }
