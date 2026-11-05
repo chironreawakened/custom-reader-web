@@ -1460,8 +1460,10 @@ function placePdfMarks(root: HTMLElement, marks: PdfPlacedMark[]): void {
 }
 
 /**
- * Render one page into `canvas` + a self-rendered text layer in `layer`.
- * Returns the page's text-layer string (the anchor coordinate system).
+ * Render one page's text layer into `layer` and return the page's
+ * text-layer string (the anchor coordinate system). The canvas render is
+ * done by the caller (it is the race-prone, cancellation-sensitive part —
+ * see the render effect) so a cancelled render never leaves a stale layer.
  *
  * The text layer mirrors pdf.js's own TextLayer positioning (transform the
  * item matrix by the page transform, place a span at the resulting % with a
@@ -1471,32 +1473,12 @@ function placePdfMarks(root: HTMLElement, marks: PdfPlacedMark[]): void {
  */
 const TEXT_LAYER_FONT = "sans-serif";
 
-async function renderPdfPage(
-  doc: PDFDocumentProxy,
-  pageNo: number,
-  canvas: HTMLCanvasElement,
+async function buildPdfTextLayer(
+  page: PDFPageProxy,
+  viewport: { width: number; height: number },
   layer: HTMLElement,
   scale: number,
 ): Promise<string> {
-  const page: PDFPageProxy = await doc.getPage(pageNo);
-  const viewport = page.getViewport({ scale });
-  const ratio = window.devicePixelRatio || 1;
-  const cssW = Math.floor(viewport.width);
-  const cssH = Math.floor(viewport.height);
-  canvas.width = Math.floor(viewport.width * ratio);
-  canvas.height = Math.floor(viewport.height * ratio);
-  canvas.style.width = `${cssW}px`;
-  canvas.style.height = `${cssH}px`;
-  layer.style.width = `${cssW}px`;
-  layer.style.height = `${cssH}px`;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("no 2d context");
-  canvas.style.visibility = "hidden";
-  const renderTask = page.render({ canvas, canvasContext: ctx, viewport, transform: ratio !== 1 ? [ratio, 0, 0, ratio, 0, 0] : undefined });
-  await renderTask.promise;
-  canvas.style.visibility = "visible";
-
-  // Build the text layer.
   layer.innerHTML = "";
   const content = await page.getTextContent();
   // Reusable off-screen ctx to measure each item's natural width (for
@@ -1595,6 +1577,8 @@ function PdfReader({ docId, onBack }: { docId: string; onBack: () => void }) {
   const layerRef = React.useRef<HTMLDivElement | null>(null);
   const docRef = React.useRef<PDFDocumentProxy | null>(null);
   const renderSeq = React.useRef(0);
+  // Promise chain serializing canvas renders (see the render effect).
+  const renderChain = React.useRef<Promise<unknown>>(Promise.resolve());
   const [docVersion, setDocVersion] = React.useState(0);
   const [pdfUrl, setPdfUrl] = React.useState<string | null>(null);
   const [loadError, setLoadError] = React.useState<string | null>(null);
@@ -1633,6 +1617,9 @@ function PdfReader({ docId, onBack }: { docId: string; onBack: () => void }) {
         if (!live) return;
         doc = d;
         docRef.current = d;
+        // New document: start a fresh render chain (a long chain from a
+        // previous doc must not delay this one's first paint).
+        renderChain.current = Promise.resolve();
         setDocVersion((v) => v + 1);
       })
       .catch((e: unknown) => {
@@ -1681,6 +1668,12 @@ function PdfReader({ docId, onBack }: { docId: string; onBack: () => void }) {
   );
 
   // Render the current page (canvas + text layer); save progress on change.
+  // Renders are SERIALIZED through `renderChain`: each render awaits the
+  // previous one and then bails if a newer request superseded it. Without
+  // this, a second `page.render()` started while the first is still in flight
+  // on the same canvas is rejected by pdf.js (concurrent render on one
+  // canvas), so the newer page never painted and the text layer stayed stuck
+  // on the previous page's content.
   React.useEffect(() => {
     const d = docRef.current;
     const canvas = canvasRef.current;
@@ -1688,17 +1681,44 @@ function PdfReader({ docId, onBack }: { docId: string; onBack: () => void }) {
     if (!d || !canvas || !layer) return;
     let live = true;
     const seq = ++renderSeq.current;
-    (async () => {
+    renderChain.current = renderChain.current.then(async () => {
+      if (!live || seq !== renderSeq.current) return; // superseded before our turn
       try {
         const p = Math.min(Math.max(1, pageNo), Math.max(1, d.numPages));
-        const text = await renderPdfPage(d, p, canvas, layer, 1.4);
+        const page = await d.getPage(p);
+        if (!live || seq !== renderSeq.current) return;
+        const scale = 1.4;
+        const viewport = page.getViewport({ scale });
+        const ratio = window.devicePixelRatio || 1;
+        const cssW = Math.floor(viewport.width);
+        const cssH = Math.floor(viewport.height);
+        canvas.width = Math.floor(viewport.width * ratio);
+        canvas.height = Math.floor(viewport.height * ratio);
+        canvas.style.width = `${cssW}px`;
+        canvas.style.height = `${cssH}px`;
+        layer.style.width = `${cssW}px`;
+        layer.style.height = `${cssH}px`;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) throw new Error("no 2d context");
+        canvas.style.visibility = "hidden";
+        const renderTask = page.render({
+          canvas,
+          canvasContext: ctx,
+          viewport,
+          transform: ratio !== 1 ? [ratio, 0, 0, ratio, 0, 0] : undefined,
+        });
+        await renderTask.promise;
+        canvas.style.visibility = "visible";
+        if (!live || seq !== renderSeq.current) return; // superseded mid-render
+        const text = await buildPdfTextLayer(page, viewport, layer, scale);
         if (!live || seq !== renderSeq.current) return;
         setPageText(text);
         void saveProgress(p);
       } catch (e) {
-        if (live && seq === renderSeq.current) setLoadError(e instanceof Error ? e.message : String(e));
+        if (live && seq === renderSeq.current)
+          setLoadError(e instanceof Error ? e.message : String(e));
       }
-    })();
+    });
     return () => {
       live = false;
     };
@@ -1839,7 +1859,7 @@ function PdfReader({ docId, onBack }: { docId: string; onBack: () => void }) {
           className="textLayer"
           onMouseUp={onMouseUp}
           // Overlay the canvas (spans inside are absolutely positioned by
-          // renderPdfPage; the parent .pdf-page is position:relative).
+          // buildPdfTextLayer; the parent .pdf-page is position:relative).
           style={{ position: "absolute", inset: 0, overflow: "hidden", cursor: "text" }}
           ref={layerRef}
         />
