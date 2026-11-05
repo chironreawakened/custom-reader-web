@@ -147,6 +147,22 @@ Local stack (verify): `e2e-postgres-1` + `s3mock` (compose
   `buildPdfTextLayer`; chain reset when a new document opens. Verified by
   the green CI e2e above (outline nav + page-1 text selection + reload
   restore all pass).
+- **Highlight "text changes" (found by the owner on prod after deploy):**
+  highlighting made the wrapped words visibly change, un-highlighting
+  reverted them. Two causes, both in the web reader (`main.tsx`):
+  1. `placePdfMarks` set the `<mark>` background but not its color — the
+     PDF text layer is intentionally `color: transparent` (the canvas is
+     the ink), and the UA stylesheet gives `<mark> color: black`, so the
+     highlighted glyphs turned opaque black over the page. Fix: marks are
+     `color: transparent` — only the background may differ.
+  2. The highlights re-render effect only ever *added* marks, so a color
+     change double-wrapped the text (nested `<mark>`) and a delete left the
+     stale mark on the page. Fix: full reconciliation — unwrap the previous
+     run's marks and `normalize()` before re-placing.
+  3. (Same session) Cancel on the pending-selection bar left the browser
+     selection highlight on screen; it is now cleared in both readers.
+  e2e now asserts: mark text transparent, no nesting, exactly one mark
+  after a color patch, zero marks after delete.
 
 ## How the owner verifies (post-deploy)
 
