@@ -766,7 +766,7 @@ function Reader({ docId, onBack }: { docId: string; onBack: () => void }) {
           >
             {createHighlight.isPending ? "Saving…" : "Highlight"}
           </button>
-          <button data-testid="cancel-highlight-btn" onClick={() => setPendingSel(null)}>
+          <button data-testid="cancel-highlight-btn" onClick={() => { setPendingSel(null); window.getSelection()?.removeAllRanges(); }}>
             Cancel
           </button>
         </div>
@@ -1453,6 +1453,12 @@ function placePdfMarks(root: HTMLElement, marks: PdfPlacedMark[]): void {
       mark.setAttribute("data-highlight-id", m.hlId);
       mark.style.background = HIGHLIGHT_BG[m.color ?? "yellow"];
       mark.style.borderRadius = "2px";
+      // The text-layer spans are color:transparent (the canvas is the ink).
+      // The UA stylesheet gives <mark> color:black, which would turn the
+      // highlighted glyphs opaque — invisible to the e2e text assertions but
+      // very visible to the reader. Keep them transparent; only the
+      // background may differ from the surrounding text.
+      mark.style.color = "transparent";
       if (m.note) mark.setAttribute("title", m.note);
       range.surroundContents(mark);
     }
@@ -1726,9 +1732,17 @@ function PdfReader({ docId, onBack }: { docId: string; onBack: () => void }) {
 
   // Re-render stored highlights for the current page: resolve each pdf
   // anchor against this page's text-layer string, wrap the range in <mark>.
+  // Full reconciliation: the previous run's marks are unwrapped first — a
+  // page render rebuilds the layer (innerHTML=""), but highlights-list
+  // changes (create/patch/delete) keep the same DOM, so without this a color
+  // change double-wraps the text and a delete leaves a stale mark.
   React.useEffect(() => {
     const root = layerRef.current;
     if (!root || pageText === null) return;
+    for (const mark of [...root.querySelectorAll("mark[data-testid='hl-mark']")]) {
+      mark.replaceWith(...mark.childNodes);
+    }
+    root.normalize(); // merge the fragments left by the previous run's splits
     const marks: PdfPlacedMark[] = [];
     for (const h of highlights.data?.items ?? []) {
       if (h.anchor.kind !== "pdf" || h.anchor.page !== pageNo) continue;
@@ -1900,7 +1914,7 @@ function PdfReader({ docId, onBack }: { docId: string; onBack: () => void }) {
           >
             {createHighlight.isPending ? "Saving…" : "Highlight"}
           </button>
-          <button data-testid="cancel-highlight-btn" onClick={() => setPendingSel(null)}>
+          <button data-testid="cancel-highlight-btn" onClick={() => { setPendingSel(null); window.getSelection()?.removeAllRanges(); }}>
             Cancel
           </button>
         </div>

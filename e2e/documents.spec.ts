@@ -214,8 +214,36 @@ test("documents: upload + read book, article, and PDF (faithful)", async ({ page
   await expect(mark, { timeout: 15_000 }).toBeVisible();
   await expect(mark).toHaveText("first chapter begins here");
 
+  // Regression (highlight bug, 2026-11): the PDF text layer is transparent —
+  // the canvas is the ink. The UA stylesheet gives <mark> black text, which
+  // made the highlighted glyphs flip opaque ("the text changes as I
+  // highlight"). The mark must stay transparent and the text must not
+  // duplicate (no nested marks from double-wrapping).
+  await expect(mark).toHaveCSS("color", "rgba(0, 0, 0, 0)");
+  expect(await mark.locator("mark").count(), "no nested <mark> after create").toBe(0);
+
+  // Changing a highlight's color is a PATCH: the highlights list refetches
+  // over the same DOM. Without the reconciliation pass the effect would
+  // re-place marks on top of the existing one (double-wrap) — assert the
+  // mark is replaced, not stacked, and the color actually changes.
+  await page.getByTestId("highlights-btn").click();
+  const panel = page.getByTestId("highlights-panel");
+  await expect(panel).toBeVisible();
+  await panel.evaluate((root) => {
+    const swatches = [...root.querySelectorAll("div,button")].filter(
+      (e) => (e as HTMLElement).style.width === "22px" && (e as HTMLElement).style.background,
+    );
+    const green = swatches.find((e) => /182,\s*240|b6f0b6/i.test((e as HTMLElement).style.background));
+    (green ?? swatches[1])!.click();
+  });
+  await expect(mark).toHaveCSS("background-color", "rgb(182, 240, 182)");
+  expect(await layer.locator("mark[data-testid='hl-mark']").count(), "no double-wrap after color patch").toBe(1);
+  expect(await mark.locator("mark").count(), "no nested <mark> after color patch").toBe(0);
+
   // Progress + highlight survive a reload: page 1 is restored (0-based
-  // locator) and the <mark> is re-rendered from its stored anchor.
+  // locator) and the <mark> is re-rendered from its stored anchor (in the
+  // green the color patch set above).
+  await page.getByTestId("highlights-btn").click(); // close the panel
   await page.waitForTimeout(1_200);
   await page.reload();
   await expect(page.getByTestId("signed-in")).toBeVisible({ timeout: 10_000 });
@@ -226,6 +254,12 @@ test("documents: upload + read book, article, and PDF (faithful)", async ({ page
   const mark2 = page.getByTestId("pdf-text-layer").locator("mark[data-testid='hl-mark']").first();
   await expect(mark2, { timeout: 15_000 }).toBeVisible();
   await expect(mark2).toHaveText("first chapter begins here");
+
+  // Deleting the highlight must remove the mark entirely (the effect used
+  // to only ever add, never remove).
+  await page.getByTestId("highlights-btn").click();
+  await page.getByTestId("highlights-panel").getByTestId("delete-highlight-btn").click();
+  await expect(page.getByTestId("pdf-text-layer").locator("mark[data-testid='hl-mark']"), { timeout: 15_000 }).toHaveCount(0);
 
   // Scanned PDF: the worker probes the text layer and flags pdfHasText=
   // false, so the reader shows the clear no-text message (SPECS §2).
