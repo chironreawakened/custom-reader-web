@@ -100,17 +100,27 @@ corpus: PDFs with outline, without outline, and scanned.
   reload → Page 1 restored with the `<mark>` re-rendered → upload scanned
   PDF → `ready` → canvas renders + `pdf-no-text` message + Page 1/1.
 
-## Verified (real output, 2026-11-04, local verify stack)
+## Verified (real output, 2026-11-04)
 
-Local stack: `e2e-postgres-1` + `s3mock` (compose `docker-compose.local-verify.yml`)
-+ API + worker on 127.0.0.1:3101, `MAILER=console`, `ALLOWED_EMAIL=e2e@reader.test`.
+**CI run `1c41c7d` (github.com, node:24-alpine, fresh postgres + s3mock):
+all jobs green — test, images, e2e (Playwright 4/4, incl. the full PDF
+path).** This is the authoritative gate: it is the exact runtime where the
+Node-24 pdfjs bug lived, and where the render-race fix had to hold.
+
+Local stack (verify): `e2e-postgres-1` + `s3mock` (compose
+`docker-compose.local-verify.yml`) + API + worker on 127.0.0.1:3101,
+`MAILER=console`, `ALLOWED_EMAIL=e2e@reader.test`.
 
 - Gates: `pnpm build` green; `pnpm -r typecheck` 3/3; `pnpm -r lint` 3/3;
   **242 unit tests green** — 102 shared (incl. 29 pdf anchor/locator cases) +
   140 api (incl. the slice-6 route tests).
-- **Live e2e (Playwright, real Chromium): 4/4 passed (56s)** — the renamed
+- **Live e2e (Playwright, real Chromium): 4/4** — the renamed
   `documents: upload + read book, article, and PDF (faithful)` test covers
   book, article, **and** the full PDF path above in one serial session.
+  (Local runs against a long-lived DB can flake on the *book* part —
+  repeated runs stack identical fixture books and the spec's `.first()` can
+  pick an old doc whose saved progress restores to Chapter One; CI's fresh
+  DB does not exhibit this.)
 - **Node-24 container repro** (the CI/prod runtime): built `dist/` run in a
   `node:24-alpine` container against the same compose stack + s3mock —
   upload outline PDF → `ready (pdf, 2 pages, 2 outline entries, text layer)`;
@@ -127,6 +137,16 @@ Local stack: `e2e-postgres-1` + `s3mock` (compose `docker-compose.local-verify.y
 - Browser (harness Chromium + Playwright): canvas 856×1108 with 4
   text-layer spans per page — the state that **failed before the canvas
   `ref` fix** (canvas stuck at 300×150, zero spans).
+- **Render race (found via CI after the Node-24 fix):** navigating
+  page 2 → page 1 left `pdf-text-layer` showing page 2's text. A second
+  `page.render()` on the shared canvas while the first was in flight is
+  rejected by pdf.js (concurrent render on one canvas), so the newer page
+  never painted. Fix: serialize all renders through a `renderChain` promise
+  (await previous → bail if superseded; checked before `getPage`, before
+  `page.render`, after `getTextContent`); text-layer build split out to
+  `buildPdfTextLayer`; chain reset when a new document opens. Verified by
+  the green CI e2e above (outline nav + page-1 text selection + reload
+  restore all pass).
 
 ## How the owner verifies (post-deploy)
 
