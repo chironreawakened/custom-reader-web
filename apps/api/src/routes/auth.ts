@@ -44,7 +44,7 @@ export async function registerAuth(app: FastifyInstance, ctx: AuthContext) {
   const config = ctx.config;
   const otpSubkey = deriveSubkey(config.masterKey, OTP_HMAC_LABEL);
 
-  const reqIp = new SlidingWindowLimiter(5, 15 * 60 * 1000); // 5 / 15 min per IP
+  const reqIp = new SlidingWindowLimiter(config.reqCodeIpLimit ?? 5, 15 * 60 * 1000); // prod: 5 / 15 min per IP
   const reqEmail = new SlidingWindowLimiter(5, 60 * 60 * 1000); // 5 / hour per email
   const verifyIp = new SlidingWindowLimiter(20, 15 * 60 * 1000); // 20 / 15 min per IP
   const now = () => (ctx.now ? ctx.now() : Date.now());

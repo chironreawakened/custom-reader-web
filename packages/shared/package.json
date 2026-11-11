@@ -10,7 +10,8 @@
     "./settings": "./src/settings.ts",
     "./anchors": "./src/anchors.ts",
     "./canonical-text": "./src/canonical-text.ts",
-    "./highlights": "./src/highlights.ts"
+    "./highlights": "./src/highlights.ts",
+    "./tts": "./src/tts.ts"
   },
   "scripts": {
     "test": "vitest run",

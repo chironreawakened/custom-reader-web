@@ -4,12 +4,15 @@
  * creates its own tables in the `pgboss` schema on start.
  */
 import pgBoss from "pg-boss";
+import type { TtsModel, TtsVoice } from "@reader/shared";
 import type { AppConfig } from "../config.js";
 
 export const JOB_EPUB_PROCESS = "epub.process";
 export const JOB_ARTICLE_PROCESS = "article.process";
 export const JOB_PDF_PROCESS = "pdf.process";
 export const JOB_BACKUP_NIGHTLY = "backup.nightly";
+/** Slice 7: synthesize one TTS chunk (one OpenAI call) and cache it. */
+export const JOB_TTS_CHUNK = "tts.chunk";
 
 export interface EpubProcessJob {
   documentId: string;
@@ -21,6 +24,17 @@ export interface ArticleProcessJob {
 
 export interface PdfProcessJob {
   documentId: string;
+}
+
+/** One TTS chunk to synthesize. `cacheKey` is the sha256 (SPECS §10) that
+ *  doubles as the pg-boss singleton key, so a second POST for the same
+ *  chunk while the first is running does not queue a duplicate job. */
+export interface TtsChunkJob {
+  userId: string;
+  cacheKey: string;
+  model: TtsModel;
+  voice: TtsVoice;
+  chunkText: string;
 }
 
 export type Boss = InstanceType<typeof pgBoss>;

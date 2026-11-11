@@ -4,6 +4,7 @@
  * OpenAI-key fields on `app.user_settings` get their routes in later slices.
  */
 import { z } from "zod";
+import { ttsModel, ttsVoice } from "./tts.js";
 
 export const readerTheme = z.enum(["light", "sepia", "dark"]);
 export type ReaderTheme = z.infer<typeof readerTheme>;
@@ -27,12 +28,24 @@ export const DEFAULT_READER_PREFS: ReaderPrefs = {
   fontSize: 16,
 };
 
-/** GET /v1/settings */
+/** GET /v1/settings — TTS fields (slice 7): model/voice fall back to the
+ *  SPECS §10 defaults when the user hasn't set them; `openaiKeyLast4` is
+ *  non-null when a key is stored (the key itself is never returned). */
 export const getSettingsResponse = z.object({
   readerPrefs,
+  ttsModel: ttsModel,
+  ttsVoice: ttsVoice,
+  openaiKeyLast4: z.string().nullable(),
 });
 export type GetSettingsResponse = z.infer<typeof getSettingsResponse>;
 
-/** PUT /v1/settings — partial: only readerPrefs is accepted in slice 3. */
-export const putSettingsBody = z.object({ readerPrefs }).strict();
+/** PUT /v1/settings — partial: any of readerPrefs/ttsModel/ttsVoice; the
+ *  route merges provided fields onto the stored row (slice 7). */
+export const putSettingsBody = z
+  .object({
+    readerPrefs: readerPrefs.optional(),
+    ttsModel: ttsModel.optional(),
+    ttsVoice: ttsVoice.optional(),
+  })
+  .strict();
 export type PutSettingsBody = z.infer<typeof putSettingsBody>;

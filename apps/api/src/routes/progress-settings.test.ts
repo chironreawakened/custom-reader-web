@@ -20,7 +20,11 @@ const state = {
   insertTable: undefined as unknown,
   insertValues: undefined as unknown,
   onConflict: undefined as unknown,
+  updateTable: undefined as unknown,
+  updateSet: undefined as unknown,
 };
+
+const done = { then: (res?: (v?: unknown) => unknown) => Promise.resolve().then(() => res?.()) };
 
 vi.mock("../db/client.js", () => ({
   getDb: () => ({
@@ -43,9 +47,18 @@ vi.mock("../db/client.js", () => ({
           return {
             onConflictDoUpdate: (o: unknown) => {
               state.onConflict = o;
-              return { then: (res: (v?: unknown) => unknown) => Promise.resolve().then(() => res?.()) };
+              return done;
             },
           };
+        },
+      };
+    },
+    update: (t: unknown) => {
+      state.updateTable = t;
+      return {
+        set: (v: unknown) => {
+          state.updateSet = v;
+          return { where: async (w: unknown) => undefined };
         },
       };
     },
@@ -92,6 +105,8 @@ function reset(rows: unknown[] = []) {
   state.insertTable = undefined;
   state.insertValues = undefined;
   state.onConflict = undefined;
+  state.updateTable = undefined;
+  state.updateSet = undefined;
 }
 
 const cookie = { rdr_session: TOKEN };
@@ -229,11 +244,16 @@ describe("GET /v1/settings", () => {
     expect(res.statusCode).toBe(401);
   });
 
-  it("returns DEFAULT_READER_PREFS when no row exists", async () => {
+  it("returns DEFAULT_READER_PREFS and TTS defaults when no row exists", async () => {
     const app = await buildApp();
     const res = await app.inject({ method: "GET", url: "/v1/settings", cookies: cookie });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ readerPrefs: { theme: "light", fontSize: 16 } });
+    expect(res.json()).toEqual({
+      readerPrefs: { theme: "light", fontSize: 16 },
+      ttsModel: "gpt-4o-mini-tts",
+      ttsVoice: "alloy",
+      openaiKeyLast4: null,
+    });
   });
 
   it("returns the stored readerPrefs", async () => {
@@ -241,7 +261,33 @@ describe("GET /v1/settings", () => {
     const app = await buildApp();
     const res = await app.inject({ method: "GET", url: "/v1/settings", cookies: cookie });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ readerPrefs: { theme: "sepia", fontSize: 18 } });
+    expect(res.json()).toEqual({
+      readerPrefs: { theme: "sepia", fontSize: 18 },
+      ttsModel: "gpt-4o-mini-tts",
+      ttsVoice: "alloy",
+      openaiKeyLast4: null,
+    });
+  });
+
+  it("returns the stored TTS model/voice and key last4", async () => {
+    reset([
+      {
+        userId: USER_ID,
+        readerPrefs: { theme: "dark", fontSize: 14 },
+        ttsModel: "gpt-4o-mini-tts",
+        ttsVoice: "marin",
+        openaiKeyLast4: "abcd",
+      },
+    ]);
+    const app = await buildApp();
+    const res = await app.inject({ method: "GET", url: "/v1/settings", cookies: cookie });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      readerPrefs: { theme: "dark", fontSize: 14 },
+      ttsModel: "gpt-4o-mini-tts",
+      ttsVoice: "marin",
+      openaiKeyLast4: "abcd",
+    });
   });
 });
 
@@ -279,9 +325,124 @@ describe("PUT /v1/settings", () => {
       headers: csrf,
     });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ readerPrefs: { theme: "dark", fontSize: 20 } });
+    expect(res.json()).toEqual({
+      readerPrefs: { theme: "dark", fontSize: 20 },
+      ttsModel: "gpt-4o-mini-tts",
+      ttsVoice: "alloy",
+      openaiKeyLast4: null,
+    });
     expect(state.insertTable).toBe(userSettings);
     expect(state.insertValues).toMatchObject({ userId: USER_ID, readerPrefs: { theme: "dark", fontSize: 20 } });
     expect(state.onConflict).toMatchObject({ target: [userSettings.userId] });
+  });
+
+  it("partially updates ttsVoice without clobbering stored readerPrefs", async () => {
+    reset([{ userId: USER_ID, readerPrefs: { theme: "sepia", fontSize: 18 } }]);
+    const app = await buildApp();
+    const res = await app.inject({
+      method: "PUT",
+      url: "/v1/settings",
+      payload: { ttsVoice: "onyx" },
+      cookies: cookie,
+      headers: csrf,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      readerPrefs: { theme: "sepia", fontSize: 18 },
+      ttsModel: "gpt-4o-mini-tts",
+      ttsVoice: "onyx",
+      openaiKeyLast4: null,
+    });
+    expect(state.insertValues).toMatchObject({
+      readerPrefs: { theme: "sepia", fontSize: 18 },
+      ttsModel: "gpt-4o-mini-tts",
+      ttsVoice: "onyx",
+    });
+  });
+});
+
+describe("PUT /v1/settings/openai-key", () => {
+  const KEY = "sk-test-abc123def456ghi789jkl012";
+
+  it("401 without a session", async () => {
+    const app = await buildApp();
+    const res = await app.inject({ method: "PUT", url: "/v1/settings/openai-key", payload: { key: KEY } });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("403 for a cookie request missing the CSRF headers", async () => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: "PUT",
+      url: "/v1/settings/openai-key",
+      payload: { key: KEY },
+      cookies: cookie,
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("400 for a key that does not look like an OpenAI key", async () => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: "PUT",
+      url: "/v1/settings/openai-key",
+      payload: { key: "definitely-not-a-key" },
+      cookies: cookie,
+      headers: csrf,
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("invalid_request");
+  });
+
+  it("stores the encrypted key and returns its last4 (cookie + CSRF)", async () => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: "PUT",
+      url: "/v1/settings/openai-key",
+      payload: { key: KEY },
+      cookies: cookie,
+      headers: csrf,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ openaiKeyLast4: KEY.slice(-4) });
+    expect(state.insertValues).toMatchObject({ userId: USER_ID, openaiKeyLast4: KEY.slice(-4) });
+    // The plaintext key must never reach the DB — only the encrypted blob.
+    expect(JSON.stringify(state.insertValues)).not.toContain(KEY);
+    expect(typeof (state.insertValues as { openaiKeyEnc?: unknown }).openaiKeyEnc).toBe("string");
+  });
+
+  it("stores the key for a bearer request (no CSRF needed)", async () => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: "PUT",
+      url: "/v1/settings/openai-key",
+      payload: { key: KEY },
+      headers: bearer,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ openaiKeyLast4: KEY.slice(-4) });
+  });
+});
+
+describe("DELETE /v1/settings/openai-key", () => {
+  it("401 without a session", async () => {
+    const app = await buildApp();
+    const res = await app.inject({ method: "DELETE", url: "/v1/settings/openai-key" });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("clears the key and reports last4 null (cookie + CSRF)", async () => {
+    reset([{ userId: USER_ID, openaiKeyLast4: "abcd" }]);
+    const app = await buildApp();
+    const res = await app.inject({
+      method: "DELETE",
+      url: "/v1/settings/openai-key",
+      cookies: cookie,
+      headers: csrf,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ openaiKeyLast4: null });
+    expect(state.updateTable).toBe(userSettings);
+    expect(state.updateSet).toEqual({ openaiKeyEnc: null, openaiKeyLast4: null, keyVersion: null });
   });
 });

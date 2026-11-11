@@ -26,6 +26,7 @@ import { canonicalText, type CanonicalMap, type CTRoot } from "@reader/shared/ca
 // Subpath import: the shared barrel re-exports node-only crypto modules
 // (rdr1, asset-url) that the browser bundle must not reach.
 import { DEFAULT_READER_PREFS, MAX_FONT_SIZE, MIN_FONT_SIZE, type ReaderTheme } from "@reader/shared/settings";
+import { TTS_DEFAULT_VOICE, TTS_VOICES, sentenceSpans, type TtsChunksResponse, type TtsVoice } from "@reader/shared/tts";
 // Slice 6: pdf.js (faithful PDF rendering). The worker file is emitted by
 // Vite as an asset; `?url` keeps the path stable across dev/prod.
 import { GlobalWorkerOptions, getDocument } from "pdfjs-dist";
@@ -488,8 +489,13 @@ function Reader({ docId, onBack }: { docId: string; onBack: () => void }) {
   });
   const settings = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
   const saveSettings = useMutation({
-    mutationFn: (prefs: { theme: ReaderTheme; fontSize: number }) =>
-      api.putSettings({ readerPrefs: prefs }),
+    mutationFn: (prefs: { theme?: ReaderTheme; fontSize?: number; ttsVoice?: TtsVoice }) =>
+      api.putSettings({
+        ...(prefs.theme !== undefined && prefs.fontSize !== undefined && {
+          readerPrefs: { theme: prefs.theme, fontSize: prefs.fontSize },
+        }),
+        ...(prefs.ttsVoice !== undefined && { ttsVoice: prefs.ttsVoice }),
+      }),
     onSuccess: (res) => void qc.setQueryData(["settings"], res),
   });
 
@@ -574,6 +580,169 @@ function Reader({ docId, onBack }: { docId: string; onBack: () => void }) {
       window.removeEventListener("scroll", onScroll);
     };
   }, [sectionId, section.data, pendingScroll, saveProgress]);
+
+  // ---- slice 7: TTS ----------------------------------------------------------
+  const [ttsOn, setTtsOn] = React.useState(false);
+  const [chunks, setChunks] = React.useState<TtsChunksResponse | null>(null);
+  const [idx, setIdx] = React.useState(0);
+  const [curChunk, setCurChunk] = React.useState<number | null>(null);
+  const [ttsUrl, setTtsUrl] = React.useState<string | null>(null);
+  const [ttsError, setTtsError] = React.useState<string | null>(null);
+  const audioRef = React.useRef<HTMLAudioElement | null>(null);
+  const pollRef = React.useRef<number | null>(null);
+
+  // Stop everything (polling + audio) — helper for toggle-off and cleanup.
+  const stopTts = React.useCallback(() => {
+    if (pollRef.current !== null) {
+      window.clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.src = "";
+    }
+    setTtsUrl(null);
+    setCurChunk(null);
+  }, []);
+
+  React.useEffect(() => () => stopTts(), [stopTts]);
+
+  const toggleTts = React.useCallback(
+    (on: boolean) => {
+      setTtsOn(on);
+      if (on) return;
+      stopTts();
+      if (sectionRef.current) clearMarks(sectionRef.current, "tts-mark");
+      setChunks(null);
+      setIdx(0);
+      setTtsError(null);
+    },
+    [stopTts],
+  );
+
+  // Fetch the chunk list for the open section (canonical offsets; no text).
+  React.useEffect(() => {
+    if (!ttsOn || !sectionId || !section.data) return;
+    setChunks(null);
+    setIdx(0);
+    setTtsError(null);
+    void api.getTtsChunks(docId, sectionId).then(setChunks).catch(() => setChunks(null));
+  }, [ttsOn, sectionId, section.data, docId]);
+
+  // Build the HTMLAudioElement for a ready chunk: wires onended to advance to
+  // the next chunk (the play effect re-runs on idx) and stores it in audioRef.
+  const makeAudio = React.useCallback(
+    (url: string, chunk: number) => {
+      const audio = new Audio(url);
+      audio.onended = () => {
+        if (!ttsOn || audioRef.current !== audio) return;
+        if (chunk + 1 >= (chunks?.chunks.length ?? 0)) return; // last chunk — stop
+        setCurChunk(null);
+        setIdx(chunk + 1);
+      };
+      audioRef.current = audio;
+      return audio;
+    },
+    [ttsOn, chunks],
+  );
+
+  // Play the current chunk: POST /v1/tts, then poll while the worker (re)generates
+  // it (202 "processing"). A cache hit answers 200 immediately — a replay makes
+  // no second OpenAI call (PLAN slice 7 verify).
+  React.useEffect(() => {
+    if (!ttsOn || !sectionId || !section.data || !chunks) return;
+    if (idx >= chunks.chunks.length) return;
+    let alive = true;
+    const target = idx;
+    const play = async () => {
+      try {
+        const res = await api.postTts(docId, sectionId, target);
+        if (!alive) return;
+        if (res.status === "ready" && res.url) {
+          setCurChunk(target);
+          setTtsUrl(res.url);
+          await makeAudio(res.url, target).play().catch(() => {
+            /* autoplay may be blocked — the panel stays usable */
+          });
+          return;
+        }
+        // 202 processing — poll until the worker finishes.
+        pollRef.current = window.setInterval(() => {
+          void api.postTts(docId, sectionId, target).then((r2) => {
+            if (!alive) return;
+            if (r2.status === "ready" && r2.url) {
+              if (pollRef.current !== null) {
+                window.clearInterval(pollRef.current);
+                pollRef.current = null;
+              }
+              setCurChunk(target);
+              setTtsUrl(r2.url);
+              void makeAudio(r2.url, target).play().catch(() => {
+                /* see above */
+              });
+            }
+          }).catch(() => {
+            /* transient network error — the interval retries */
+          });
+        }, 2000);
+      } catch (err) {
+        if (!alive) return;
+        // no_openai_key (409) or other failure: surface it, stop the queue.
+        setTtsError((err as Error).message ?? "TTS failed");
+      }
+    };
+    void play();
+    return () => {
+      alive = false;
+      if (pollRef.current !== null) {
+        window.clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+      audioRef.current?.pause();
+    };
+  }, [ttsOn, sectionId, section.data, chunks, idx, docId, makeAudio]);
+
+  // Sentence highlight: while a chunk plays, wrap its FIRST sentence in the
+  // rendered section (tts-mark; distinct from the slice-4 hl-mark so the two
+  // never clobber each other). Chunk spans are relative to the chunk text,
+  // which starts at `startOffset` in the section's canonical text.
+  React.useEffect(() => {
+    const root = sectionRef.current;
+    if (!ttsOn || curChunk === null || !chunks || !root) return;
+    const ch = chunks.chunks[curChunk];
+    if (!ch) return;
+    const { text, map } = canonicalText(root as unknown as CTRoot);
+    const chunkText = text.slice(ch.startOffset, ch.endOffset);
+    const first = sentenceSpans(chunkText)[0];
+    if (!first) return;
+    const ranges: PlacedRange[] = [
+      {
+        hlId: "tts-sentence",
+        color: null,
+        note: null,
+        start: ch.startOffset + first.start,
+        end: ch.startOffset + first.end,
+        markId: "tts-mark",
+        bg: "#7ec8ff44",
+      },
+    ];
+    try {
+      clearMarks(root, "tts-mark");
+      placeRanges(root, map, ranges);
+    } catch {
+      /* section re-rendered mid-map — the next chunk start retries */
+    }
+  }, [ttsOn, curChunk, chunks, section.data]);
+
+  // Next/prev chunk.
+  const stepChunk = React.useCallback(
+    (delta: number) => {
+      setCurChunk(null);
+      if (audioRef.current) audioRef.current.pause();
+      setIdx((i) => Math.max(0, Math.min((chunks?.chunks.length ?? 1) - 1, i + delta)));
+    },
+    [chunks],
+  );
 
   // ---- slice 4: highlights ---------------------------------------------------
   const [showHighlights, setShowHighlights] = React.useState(false);
@@ -689,7 +858,13 @@ function Reader({ docId, onBack }: { docId: string; onBack: () => void }) {
       data-theme={prefs.theme}
       style={{ background: theme.bg, color: theme.fg, borderRadius: 12, padding: 16, transition: "background 120ms" }}
     >
-      <BackBar onBack={onBack} title={d.title} onHighlights={() => setShowHighlights(true)} />
+      <BackBar
+        onBack={onBack}
+        title={d.title}
+        onHighlights={() => setShowHighlights(true)}
+        onTts={() => toggleTts(!ttsOn)}
+        ttsActive={ttsOn}
+      />
       <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
         {d.coverUrl ? (
           <img
@@ -717,6 +892,70 @@ function Reader({ docId, onBack }: { docId: string; onBack: () => void }) {
           ) : null}
         </div>
       </div>
+
+      {ttsOn ? (
+        <div
+          data-testid="tts-panel"
+          style={{
+            marginTop: 16,
+            padding: "10px 14px",
+            background: theme.bg === "#ffffff" ? "rgba(0,0,0,0.05)" : "rgba(255,255,255,0.08)",
+            borderRadius: 10,
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 10,
+            alignItems: "center",
+            fontSize: 14,
+          }}
+        >
+          {ttsError ? (
+            <span data-testid="tts-error" style={{ color: "crimson", flex: 1 }}>
+              {ttsError}{" "}
+              <a href="#" onClick={(e) => e.preventDefault()} data-testid="tts-settings-link">
+                Set your OpenAI key in Settings
+              </a>
+            </span>
+          ) : null}
+          {chunks ? (
+            <span data-testid="tts-progress" style={{ opacity: 0.8 }}>
+              Chunk {Math.min(idx + 1, chunks.chunks.length)} / {chunks.chunks.length}
+            </span>
+          ) : (
+            <span data-testid="tts-loading">Loading chunks…</span>
+          )}
+          {curChunk !== null ? (
+            <span data-testid="tts-state">Reading…</span>
+          ) : null}
+          <span style={{ marginLeft: "auto", display: "inline-flex", gap: 6 }}>
+            <button
+              type="button"
+              data-testid="tts-prev-btn"
+              disabled={!chunks || idx <= 0}
+              onClick={() => stepChunk(-1)}
+              style={{ padding: "4px 10px", borderRadius: 8 }}
+            >
+              ⏮
+            </button>
+            <button
+              type="button"
+              data-testid="tts-next-btn"
+              disabled={!chunks || idx >= (chunks?.chunks.length ?? 0) - 1}
+              onClick={() => stepChunk(1)}
+              style={{ padding: "4px 10px", borderRadius: 8 }}
+            >
+              ⏭
+            </button>
+            <button
+              type="button"
+              data-testid="tts-stop-btn"
+              onClick={() => toggleTts(false)}
+              style={{ padding: "4px 10px", borderRadius: 8 }}
+            >
+              ⏹ Stop
+            </button>
+          </span>
+        </div>
+      ) : null}
 
       <div id="content" style={{ marginTop: 20, lineHeight: 1.7, fontSize: `${prefs.fontSize}px` }} onMouseUp={onMouseUp}>
         {section.isError ? (
@@ -1045,7 +1284,19 @@ function HighlightsPanel({
   );
 }
 
-function BackBar({ onBack, title, onHighlights }: { onBack: () => void; title: string; onHighlights?: () => void }) {
+function BackBar({
+  onBack,
+  title,
+  onHighlights,
+  onTts,
+  ttsActive,
+}: {
+  onBack: () => void;
+  title: string;
+  onHighlights?: () => void;
+  onTts?: () => void;
+  ttsActive?: boolean;
+}) {
   return (
     <div style={{ marginBottom: 12 }}>
       <button onClick={onBack} type="button" data-testid="back-btn" style={{ padding: "6px 12px", borderRadius: 8 }}>
@@ -1060,6 +1311,17 @@ function BackBar({ onBack, title, onHighlights }: { onBack: () => void; title: s
           style={{ marginLeft: 10, padding: "6px 12px", borderRadius: 8 }}
         >
           Highlights
+        </button>
+      ) : null}
+      {onTts ? (
+        <button
+          type="button"
+          data-testid="tts-toggle-btn"
+          aria-pressed={ttsActive}
+          onClick={onTts}
+          style={{ marginLeft: 10, padding: "6px 12px", borderRadius: 8 }}
+        >
+          {ttsActive ? "⏹ Stop reading" : "🔊 Listen"}
         </button>
       ) : null}
     </div>
@@ -1156,11 +1418,17 @@ interface PlacedRange {
   note: string | null;
   start: number;
   end: number;
+  /** mark data-testid (slice 4: 'hl-mark'; slice 7 TTS: 'tts-mark'). */
+  markId?: string;
+  /** Explicit background (slice 7 TTS); defaults to the highlight color. */
+  bg?: string;
 }
 
-/** Remove hl-marks previously placed by this module (unwrap, keep text). */
-function clearMarks(root: HTMLElement): void {
-  const marks = root.querySelectorAll("mark[data-testid='hl-mark']");
+/** Remove marks previously placed by this module (unwrap, keep text).
+ *  `markId` = the data-testid attribute: 'hl-mark' (user highlights) or
+ *  'tts-mark' (the slice-7 sentence highlight) — each clears only its own. */
+function clearMarks(root: HTMLElement, markId = "hl-mark"): void {
+  const marks = root.querySelectorAll(`mark[data-testid='${markId}']`);
   marks.forEach((m) => {
     while (m.firstChild) m.parentNode!.insertBefore(m.firstChild, m);
     m.remove();
@@ -1267,9 +1535,9 @@ function placeRanges(root: HTMLElement, map: CanonicalMap, ranges: PlacedRange[]
       range.setStart(node, 0);
       range.setEnd(node, node.data.length);
       const mark = document.createElement("mark");
-      mark.setAttribute("data-testid", "hl-mark");
+      mark.setAttribute("data-testid", r.markId ?? "hl-mark");
       mark.setAttribute("data-highlight-id", r.hlId);
-      mark.style.background = HIGHLIGHT_BG[r.color ?? "yellow"];
+      mark.style.background = r.bg ?? HIGHLIGHT_BG[r.color ?? "yellow"];
       mark.style.borderRadius = "2px";
       if (r.note) mark.setAttribute("title", r.note);
       range.surroundContents(mark);
@@ -2000,6 +2268,128 @@ function OpenDocView({ docId, onBack }: { docId: string; onBack: () => void }) {
   return <Reader docId={docId} onBack={onBack} />;
 }
 
+/**
+ * Slice 7 settings: the OpenAI key (required for TTS) and the TTS voice.
+ * The key is stored server-side encrypted (RDR1) and never returned — only
+ * the last-4 digits show. Voice/model changes apply to future TTS requests
+ * (the cache key includes model+voice, so old audio is still served).
+ */
+function SettingsModal({ onClose }: { onClose: () => void }) {
+  const qc = useQueryClient();
+  const settings = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
+  const [keyInput, setKeyInput] = React.useState("");
+  const [keyMsg, setKeyMsg] = React.useState<{ ok: boolean; text: string } | null>(null);
+  const putKey = useMutation({
+    mutationFn: (key: string) => api.putOpenAiKey({ key }),
+    onSuccess: (res) => {
+      void qc.setQueryData(["settings"], res);
+      setKeyInput("");
+      setKeyMsg({ ok: true, text: `Key saved (…${res.openaiKeyLast4}). TTS is ready.` });
+    },
+    onError: (err) => setKeyMsg({ ok: false, text: (err as Error).message }),
+  });
+  const delKey = useMutation({
+    mutationFn: api.deleteOpenAiKey,
+    onSuccess: (res) => {
+      void qc.setQueryData(["settings"], res);
+      setKeyMsg({ ok: true, text: "Key removed." });
+    },
+  });
+  const setVoice = useMutation({
+    mutationFn: (voice: TtsVoice) => api.putSettings({ ttsVoice: voice }),
+    onSuccess: (res) => void qc.setQueryData(["settings"], res),
+  });
+  const s = settings.data;
+  return (
+    <div
+      role="dialog"
+      aria-label="Settings"
+      data-testid="settings-modal"
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.5)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 50,
+        padding: 16,
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div style={{ background: "#fff", color: "#111", borderRadius: 12, padding: 20, width: "min(480px, 92vw)", boxShadow: "0 8px 30px rgba(0,0,0,0.25)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <h2 style={{ margin: 0, fontSize: 20 }}>Settings</h2>
+          <button type="button" onClick={onClose} data-testid="settings-close" style={{ border: "none", background: "none", fontSize: 20, cursor: "pointer" }}>
+            ✕
+          </button>
+        </div>
+
+        <h3 style={{ margin: "14px 0 6px", fontSize: 15 }}>Text-to-speech (OpenAI)</h3>
+        <p style={{ fontSize: 13, opacity: 0.7, margin: "0 0 8px" }}>
+          TTS needs your own OpenAI API key. It is stored encrypted on your account and used only for your requests.
+        </p>
+        {s?.openaiKeyLast4 ? (
+          <p style={{ fontSize: 14 }}>
+            Current key: <code>…{s.openaiKeyLast4}</code>{" "}
+            <button type="button" data-testid="settings-delkey" disabled={delKey.isPending} onClick={() => delKey.mutate()} style={{ fontSize: 13 }}>
+              Remove
+            </button>
+          </p>
+        ) : (
+          <p style={{ fontSize: 14, color: "#8a5a00" }}>No key saved yet — TTS won't work until you add one.</p>
+        )}
+        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+          <input
+            data-testid="settings-key"
+            type="password"
+            placeholder="sk-…"
+            value={keyInput}
+            onChange={(e) => setKeyInput(e.target.value)}
+            style={{ flex: 1, padding: "6px 10px", borderRadius: 8, border: "1px solid #ccc" }}
+          />
+          <button
+            type="button"
+            data-testid="settings-savekey"
+            disabled={!keyInput.trim() || putKey.isPending}
+            onClick={() => putKey.mutate(keyInput.trim())}
+            style={{ padding: "6px 14px", borderRadius: 8 }}
+          >
+            {putKey.isPending ? "Saving…" : "Save key"}
+          </button>
+        </div>
+        {keyMsg ? (
+          <p data-testid="settings-keymsg" style={{ fontSize: 13, marginTop: 6, color: keyMsg.ok ? "#1a7f37" : "#c0392b" }}>
+            {keyMsg.text}
+          </p>
+        ) : null}
+
+        <h3 style={{ margin: "18px 0 6px", fontSize: 15 }}>Voice</h3>
+        <select
+          data-testid="settings-voice"
+          value={s?.ttsVoice ?? TTS_DEFAULT_VOICE}
+          disabled={setVoice.isPending}
+          onChange={(e) => setVoice.mutate(e.target.value as TtsVoice)}
+          style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #ccc" }}
+        >
+          {TTS_VOICES.map((v) => (
+            <option key={v} value={v}>
+              {v}
+            </option>
+          ))}
+        </select>
+        {s ? (
+          <p style={{ fontSize: 12, opacity: 0.6, marginTop: 8 }}>
+            Model: {s.ttsModel} · Audio format: mp3
+          </p>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function SignedIn() {
   const me = useMe();
   const qc = useQueryClient();
@@ -2010,6 +2400,7 @@ function SignedIn() {
     },
   });
   const [openDoc, setOpenDoc] = React.useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = React.useState(false);
   React.useEffect(() => {
     if (openDoc) window.scrollTo(0, 0);
   }, [openDoc]);
@@ -2020,10 +2411,14 @@ function SignedIn() {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
           <h1 style={{ fontSize: 26, margin: 0 }}>Personal Reader</h1>
           <span id="hello" style={{ opacity: 0.7, fontSize: 14 }}>Hello {me.data.email}</span>
+          <button onClick={() => setSettingsOpen(true)} disabled={settingsOpen} data-testid="settings-btn" style={{ opacity: 0.7, marginRight: 12 }}>
+            Settings
+          </button>
           <button onClick={() => logout.mutate()} disabled={logout.isPending} data-testid="logout-btn" style={{ opacity: 0.7 }}>
             Log out
           </button>
         </div>
+        {settingsOpen ? <SettingsModal onClose={() => setSettingsOpen(false)} /> : null}
         <HealthLine />
         {openDoc ? (
           <OpenDocView docId={openDoc} onBack={() => setOpenDoc(null)} />

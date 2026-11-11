@@ -21,6 +21,9 @@ import type {
   PatchDocumentResponse,
   PostUrlResponse,
   TagItem,
+  TtsChunksResponse,
+  PostTtsResponse,
+  PutOpenAiKeyBody,
 } from "@reader/shared";
 
 /** Thin fetch client for the /v1 API. Same-origin; cookies carry the session. */
@@ -28,7 +31,14 @@ import type {
 async function unwrap<T>(res: Response): Promise<T> {
   if (res.status === 204) return undefined as T;
   const body = (await res.json().catch(() => null)) as (T & ApiError) | null;
-  if (!res.ok) throw new Error(body?.error?.message ?? `HTTP ${res.status}`);
+  if (!res.ok) {
+    const e = new Error(body?.error?.message ?? `HTTP ${res.status}`);
+    // Attach the API error code (e.g. "no_openai_key") for callers that need
+    // to branch on it; the message alone can't be matched reliably.
+    const code = body?.error?.code;
+    if (code !== undefined) (e as Error & { code?: string }).code = code;
+    throw e;
+  }
   return body as T;
 }
 
@@ -152,6 +162,34 @@ export const api = {
       headers: { ...headers, "content-type": "application/json" },
       body: JSON.stringify(body),
     }).then((r) => unwrap<GetSettingsResponse>(r));
+  },
+  /** Slice 7: store/replace the user's OpenAI key (409-free; response echoes last4). */
+  putOpenAiKey(body: PutOpenAiKeyBody): Promise<GetSettingsResponse> {
+    return fetch("/v1/settings/openai-key", {
+      method: "PUT",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }).then((r) => unwrap<GetSettingsResponse>(r));
+  },
+  deleteOpenAiKey(): Promise<GetSettingsResponse> {
+    return fetch("/v1/settings/openai-key", { method: "DELETE", headers }).then((r) => unwrap<GetSettingsResponse>(r));
+  },
+
+  // ---- TTS (slice 7) --------------------------------------------------------
+  /** Chunk list for a section: canonical offsets only (no text). */
+  getTtsChunks(docId: string, sectionId: string): Promise<TtsChunksResponse> {
+    return fetch(`/v1/documents/${docId}/sections/${sectionId}/tts-chunks`, { headers }).then((r) =>
+      unwrap<TtsChunksResponse>(r),
+    );
+  },
+  /** Request one chunk's audio. 200 = ready now (cache hit, url present);
+   *  202 = queued — re-call until status flips to ready. */
+  postTts(docId: string, sectionId: string, chunkIndex: number): Promise<PostTtsResponse> {
+    return fetch("/v1/tts", {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ documentId: docId, sectionId, chunkIndex }),
+    }).then((r) => unwrap<PostTtsResponse>(r));
   },
 
   // ---- highlights (slice 4) ------------------------------------------------

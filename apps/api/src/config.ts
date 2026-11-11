@@ -18,6 +18,12 @@ const schema = z.object({
   SMTP_PORT: z.coerce.number().int().optional(),
   SMTP_USER: z.string().optional(),
   SMTP_PASS: z.string().optional(),
+  // TTS (slice 7): OpenAI base URL. prod: https://api.openai.com (default);
+  // CI/e2e: a local mock (same pattern as HIPPUS_ENDPOINT → s3mock).
+  OPENAI_API_BASE_URL: z.string().url().optional(),
+  // Auth (slice 7 e2e): raise the request-code IP limit above the prod 5 so a
+  // CI run with >4 spec logins keeps headroom. Undefined = prod default (5).
+  AUTH_REQCODE_IP_LIMIT: z.coerce.number().int().positive().optional(),
 });
 
 export interface AppConfig {
@@ -40,6 +46,10 @@ export interface AppConfig {
     user: string;
     pass: string;
   };
+  /** OpenAI base URL for TTS (no trailing slash); undefined = the real API. */
+  openAiBaseUrl?: string;
+  /** request-code IP limiter limit; undefined = the prod default (5). */
+  reqCodeIpLimit?: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -67,6 +77,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     publicOrigin: e.RDR_HOSTNAME,
     env: e.RDR_ENV ?? "prod",
     mailer: e.MAILER,
+    ...(e.OPENAI_API_BASE_URL && { openAiBaseUrl: e.OPENAI_API_BASE_URL }),
+    ...(e.AUTH_REQCODE_IP_LIMIT && { reqCodeIpLimit: e.AUTH_REQCODE_IP_LIMIT }),
     ...(e.MAILER === "smtp" && {
       smtp: {
         host: e.SMTP_HOST!,

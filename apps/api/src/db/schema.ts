@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import { pgSchema } from "drizzle-orm/pg-core";
 import { boolean, customType, index, integer, jsonb, primaryKey, text, timestamp, uniqueIndex, uuid, varchar } from "drizzle-orm/pg-core";
-import type { HighlightAnchor, Locator, ReaderPrefs } from "@reader/shared";
+import type { HighlightAnchor, Locator, ReaderPrefs, TtsModel, TtsVoice } from "@reader/shared";
 
 /** tsvector column (SPECS §9: only the tsvector of section text is stored). */
 export const tsvector = customType<{ data: string }>({
@@ -197,8 +197,9 @@ export const userSettings = app.table("user_settings", {
   openaiKeyEnc: text("openai_key_enc"),
   openaiKeyLast4: text("openai_key_last4"),
   keyVersion: integer("key_version"),
-  ttsModel: text("tts_model"),
-  ttsVoice: text("tts_voice"),
+  /** Current TTS model (SPECS §10). Plain text in SQL; typed via $type. */
+  ttsModel: text("tts_model").$type<TtsModel>(),
+  ttsVoice: text("tts_voice").$type<TtsVoice>(),
   /** { theme, fontSize } — the reader display preferences. */
   readerPrefs: jsonb("reader_prefs").$type<ReaderPrefs>(),
 });
@@ -255,8 +256,29 @@ export const documentTags = app.table(
   (t) => [primaryKey({ columns: [t.documentId, t.tagId] })],
 );
 
+// --- slice 7: TTS cache (SPECS §10, §11) ---
+
+/**
+ * TTS audio cache (SPECS §10): `cache_key` = sha256(TTS_NORMALIZATION_VERSION
+ * | model | voice | chunkText), shared across the user's sections — the same
+ * chunk text anywhere is synthesized once per user and then served from the
+ * RDR1 object. `object_id` points at the storage object (audio/mpeg); the
+ * matching `assets` row (role `tts`) carries the document link used by the
+ * signed-URL route.
+ */
+export const ttsCache = app.table(
+  "tts_cache",
+  {
+    cacheKey: text("cache_key").primaryKey(),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    /** storage_objects.id of the RDR1-encrypted mp3. */
+    objectId: uuid("object_id").notNull().references(() => storageObjects.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("tts_cache_user_idx").on(t.userId)],
+);
+
 // --- remaining tables (SPECS §11), added in the slices that use them ---
-// tts_cache -> its slice.
 
 export type User = typeof users.$inferSelect;
 export type StorageObject = typeof storageObjects.$inferSelect;
@@ -272,3 +294,4 @@ export type UserSettings = typeof userSettings.$inferSelect;
 export type Highlight = typeof highlights.$inferSelect;
 export type Tag = typeof tags.$inferSelect;
 export type DocumentTag = typeof documentTags.$inferSelect;
+export type TtsCache = typeof ttsCache.$inferSelect;

@@ -57,6 +57,13 @@
       "when": 1793800225614,
       "tag": "0007_pdf_faithful",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1794344331786,
+      "tag": "0008_sweet_morlun",
+      "breakpoints": true
     }
   ]
 }

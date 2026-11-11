@@ -13,6 +13,7 @@ import { registerDocuments } from "./routes/documents.js";
 import { registerProgressSettings } from "./routes/progress-settings.js";
 import { registerHighlights } from "./routes/highlights.js";
 import { registerTags } from "./routes/tags.js";
+import { registerTts } from "./routes/tts.js";
 import { createBoss } from "./jobs/boss.js";
 import type { AppConfig } from "./config.js";
 import type { Mailer } from "./services/mailer.js";
@@ -60,6 +61,7 @@ export async function buildServer(cfg = loadConfig(), opts: BuildServerOptions =
   await registerProgressSettings(app, { config: cfg, now: opts.now });
   await registerHighlights(app, { config: cfg, objectStore, now: opts.now });
   await registerTags(app, { config: cfg, now: opts.now });
+  await registerTts(app, { config: cfg, objectStore, boss, now: opts.now });
 
   // CI e2e only: serve the built SPA so Playwright can drive the real UI at the
   // API origin (in prod Caddy serves /srv/reader/web-dist instead).

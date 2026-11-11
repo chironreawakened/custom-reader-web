@@ -16,7 +16,7 @@ import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { Rdr1, type ObjectMeta } from "@reader/shared";
 import { loadConfig } from "./config.js";
 import { getDb, closeDb } from "./db/client.js";
-import { assets, backups, documents, sections, users, tocEntries } from "./db/schema.js";
+import { assets, backups, documents, sections, tocEntries, ttsCache, users, userSettings } from "./db/schema.js";
 import { createS3Storage } from "./storage/s3.js";
 import { createObjectStore } from "./storage/object-store.js";
 import { EpubError, PARSER_VERSION, parseEpub } from "./services/epub/parse-epub.js";
@@ -29,11 +29,15 @@ import {
   JOB_BACKUP_NIGHTLY,
   JOB_EPUB_PROCESS,
   JOB_PDF_PROCESS,
+  JOB_TTS_CHUNK,
   type ArticleProcessJob,
   type EpubProcessJob,
   type PdfProcessJob,
+  type TtsChunkJob,
 } from "./jobs/boss.js";
 import { backupKindFor } from "./jobs/backup-schedule.js";
+import { decryptOpenAiKey } from "./services/openai-key.js";
+import { OpenAiTtsError, synthesizeChunk } from "./services/tts.js";
 
 const pExecFile = promisify(execFile);
 
@@ -584,6 +588,94 @@ await boss.work<PdfProcessJob>(
   },
 );
 
+// TTS chunk (slice 7): synthesize one chunk with the user's OpenAI key,
+// encrypt the MP3 as an RDR1 object, and record it in tts_cache. The
+// cache key doubles as the pg-boss singleton key, so concurrent POSTs for
+// the same chunk share one job; a duplicate job finding a fresh cache row
+// is a no-op. OpenAI 429s retry (the client will poll again anyway); a
+// rejected key is terminal — retrying with the same key cannot help.
+async function processTtsChunk(data: TtsChunkJob): Promise<void> {
+  const [settings] = await db
+    .select()
+    .from(userSettings)
+    .where(eq(userSettings.userId, data.userId))
+    .limit(1);
+  if (!settings?.openaiKeyEnc) {
+    // eslint-disable-next-line no-console
+    console.log(`[worker] tts.chunk ${data.cacheKey}: user has no OpenAI key; dropping`);
+    return;
+  }
+  const [existing] = await db
+    .select()
+    .from(ttsCache)
+    .where(eq(ttsCache.cacheKey, data.cacheKey))
+    .limit(1);
+  if (existing?.objectId) {
+    // eslint-disable-next-line no-console
+    console.log(`[worker] tts.chunk ${data.cacheKey}: already cached; no-op`);
+    return;
+  }
+
+  let apiKey: string;
+  try {
+    apiKey = decryptOpenAiKey(settings.openaiKeyEnc, cfg.masterKey);
+  } catch {
+    // Corrupted ciphertext — treat as "no key" rather than a crash loop.
+    // eslint-disable-next-line no-console
+    console.error(`[worker] tts.chunk ${data.cacheKey}: stored key undecryptable; dropping`);
+    return;
+  }
+
+  let mp3: Uint8Array;
+  try {
+    mp3 = await synthesizeChunk({
+      apiKey,
+      model: data.model,
+      voice: data.voice,
+      text: data.chunkText,
+      ...(cfg.openAiBaseUrl && { baseUrl: cfg.openAiBaseUrl }),
+    });
+  } catch (e) {
+    if (e instanceof OpenAiTtsError && e.code === "tts_rate_limited") {
+      throw e; // retry later (queue retryLimit) — the client polls anyway
+    }
+    if (e instanceof OpenAiTtsError && e.code === "bad_openai_key") {
+      // eslint-disable-next-line no-console
+      console.log(`[worker] tts.chunk ${data.cacheKey}: openai rejected the key; dropping`);
+      return;
+    }
+    throw e;
+  }
+
+  const objectId = await objectStore.put(mp3, data.userId, "audio/mpeg");
+  await db
+    .insert(ttsCache)
+    .values({ cacheKey: data.cacheKey, userId: data.userId, objectId })
+    .onConflictDoNothing();
+  // eslint-disable-next-line no-console
+  console.log(`[worker] tts.chunk ${data.cacheKey}: cached (${mp3.byteLength} B mp3)`);
+}
+
+await boss.createQueue(JOB_TTS_CHUNK, {
+  name: JOB_TTS_CHUNK,
+  expireInSeconds: 3600,
+  retryLimit: 3,
+  retryDelay: 30,
+  retryBackoff: true,
+  retentionSeconds: 7 * 24 * 3600,
+});
+await boss.work<TtsChunkJob>(
+  JOB_TTS_CHUNK,
+  {
+    batchSize: 1,
+  },
+  async (jobs) => {
+    for (const job of jobs) {
+      await processTtsChunk(job.data);
+    }
+  },
+);
+
 await boss.createQueue(JOB_BACKUP_NIGHTLY, {
   name: JOB_BACKUP_NIGHTLY,
   expireInSeconds: 3600,
@@ -604,4 +696,6 @@ await boss.work(
 await boss.schedule(JOB_BACKUP_NIGHTLY, BACKUP_CRON, {}, { tz: "Europe/Helsinki" });
 
 // eslint-disable-next-line no-console
-console.log("[worker] started: epub.process + article.process + pdf.process + backup.nightly");
+console.log(
+  "[worker] started: epub.process + article.process + pdf.process + tts.chunk + backup.nightly",
+);
