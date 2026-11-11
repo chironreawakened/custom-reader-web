@@ -9,3 +9,4 @@ e2e/docker-compose.local-verify.yml
 
 # Playwright run artifacts (local + CI scratch)
 e2e/test-results/
+tmp/

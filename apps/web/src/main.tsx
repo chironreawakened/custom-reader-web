@@ -629,6 +629,17 @@ function Reader({ docId, onBack }: { docId: string; onBack: () => void }) {
     void api.getTtsChunks(docId, sectionId).then(setChunks).catch(() => setChunks(null));
   }, [ttsOn, sectionId, section.data, docId]);
 
+  // TEMP debug (slice 7 e2e): what does the CLIENT actually see?
+  React.useEffect(() => {
+    console.log("TTS-DEBUG chunks", chunks ? chunks.chunks.map((c) => `[${c.index}] ${c.startOffset}-${c.endOffset}`).join(" | ") : "null");
+    const root = sectionRef.current;
+    if (root) {
+      const ct = canonicalText(root as unknown as CTRoot);
+      console.log("TTS-DEBUG client-canonical len=", ct.text.length, "first60=", JSON.stringify(ct.text.slice(0, 60)));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chunks]);
+
   // Build the HTMLAudioElement for a ready chunk: wires onended to advance to
   // the next chunk (the play effect re-runs on idx) and stores it in audioRef.
   const makeAudio = React.useCallback(
