@@ -113,7 +113,11 @@ test("tts: no-key error, synthesize via worker, sentence highlight, cache hit", 
   await page.getByTestId("settings-btn").click();
   await expect(page.getByTestId("settings-modal")).toBeVisible();
   await page.getByTestId("settings-key").fill(FAKE_KEY);
+  // TEMP debug (slice 7 e2e): what did the input actually end up with?
+  console.log("TTS-DEBUG input value length:", (await page.getByTestId("settings-key").inputValue()).length);
   await page.getByTestId("settings-savekey").click();
+  await expect(page.getByTestId("settings-keymsg")).toBeVisible({ timeout: 10_000 });
+  console.log("TTS-DEBUG keymsg:", await page.getByTestId("settings-keymsg").textContent());
   await expect(page.getByTestId("settings-keymsg")).toContainText("Key saved", { timeout: 10_000 });
   // The voice select lists the shared voice list (13 options).
   await expect(page.getByTestId("settings-voice").locator("option")).toHaveCount(13);
