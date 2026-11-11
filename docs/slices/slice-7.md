@@ -1,6 +1,8 @@
 # Slice 7 — TTS (text-to-speech reading)
 
-Status: **done** (local gates green 2026-11-11; e2e verified by CI)
+Status: **in progress** (local gates green 2026-11-11; e2e still red in CI —
+see Verification; the highlight bug was root-caused locally on 2026-11-11 and
+fixed, awaiting a green CI run)
 
 ## What shipped
 
@@ -58,3 +60,11 @@ highlighting of the currently spoken chunk.
   cache behavior via the mock request counter, not a second audio response.
 - `page.request.networkLog()` does not exist in Playwright 1.64; use a
   `page.on("response")` listener with `headerValue("content-type")`.
+- `placeRanges`/`pointAtCanonical` must skip whitespace-only text nodes
+  that carry no canonical characters (fully trimmed at block boundaries):
+  `toCanonical` falls back to offset 0 for them, so they bracketed offset 0
+  and any range starting there (e.g. the heading chunk) wrapped them in
+  empty `<mark>` runs — 3 `tts-mark`s instead of 1 in the e2e.
+- The e2e mock's silence MP3 is 300 s on purpose: with 8 s audio the
+  `onended` auto-advance moved the player past the heading chunk before
+  assertions ran, which masked the highlight bug as a wrong-chunk symptom.
