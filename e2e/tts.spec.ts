@@ -112,9 +112,23 @@ test("tts: no-key error, synthesize via worker, sentence highlight, cache hit", 
   // ---- 2. Save a key in the Settings modal (top-bar Settings button).
   await page.getByTestId("settings-btn").click();
   await expect(page.getByTestId("settings-modal")).toBeVisible();
-  await page.getByTestId("settings-key").pressSequentially(FAKE_KEY);
-  // TEMP debug (slice 7 e2e): what did the input actually end up with?
-  console.log("TTS-DEBUG input value length:", (await page.getByTestId("settings-key").inputValue()).length);
+  // TEMP debug (slice 7 e2e): per-keystroke trace of the controlled input.
+  await page.getByTestId("settings-key").click();
+  for (const ch of FAKE_KEY) {
+    await page.getByTestId("settings-key").press(ch);
+    const v = await page.getByTestId("settings-key").inputValue();
+    if (v.length < 6 || ch === FAKE_KEY[FAKE_KEY.length - 1]) {
+      console.log("TTS-DEBUG keystroke, value now:", JSON.stringify(v));
+    }
+  }
+  console.log("TTS-DEBUG count of settings-key inputs:", await page.getByTestId("settings-key").count());
+  console.log(
+    "TTS-DEBUG activeElement:",
+    await page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null;
+      return el ? `${el.tagName} testid=${el.getAttribute("data-testid")}` : "none";
+    }),
+  );
   await expect(page.getByTestId("settings-key")).toHaveValue(FAKE_KEY);
   await page.getByTestId("settings-savekey").click();
   await expect(page.getByTestId("settings-keymsg")).toBeVisible({ timeout: 10_000 });
