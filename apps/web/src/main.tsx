@@ -629,17 +629,6 @@ function Reader({ docId, onBack }: { docId: string; onBack: () => void }) {
     void api.getTtsChunks(docId, sectionId).then(setChunks).catch(() => setChunks(null));
   }, [ttsOn, sectionId, section.data, docId]);
 
-  // TEMP debug (slice 7 e2e): what does the CLIENT actually see?
-  React.useEffect(() => {
-    console.log("TTS-DEBUG chunks", chunks ? chunks.chunks.map((c) => `[${c.index}] ${c.startOffset}-${c.endOffset}`).join(" | ") : "null");
-    const root = sectionRef.current;
-    if (root) {
-      const ct = canonicalText(root as unknown as CTRoot);
-      console.log("TTS-DEBUG client-canonical len=", ct.text.length, "first60=", JSON.stringify(ct.text.slice(0, 60)));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chunks]);
-
   // Build the HTMLAudioElement for a ready chunk: wires onended to advance to
   // the next chunk (the play effect re-runs on idx) and stores it in audioRef.
   const makeAudio = React.useCallback(
@@ -1462,7 +1451,16 @@ function pointAtCanonical(root: HTMLElement, off: number, map: CanonicalMap): { 
   let cur: Text | null;
   while ((cur = walker.nextNode() as Text | null)) {
     const c = cur as unknown as { nodeType: 3; nodeName: string; data: string };
-    segs.push({ node: cur, s: map.toCanonical(c, 0), e: map.toCanonical(c, cur.data.length) + 1 });
+    const s = map.toCanonical(c, 0);
+    const e = map.toCanonical(c, cur.data.length) + 1;
+    // Whitespace-only nodes whose characters are all trimmed at block
+    // boundaries contribute no canonical chars, so toCanonical falls back to
+    // offset 0 for them. Left in, such a node brackets offset 0 and would be
+    // treated as inside any range starting there, producing empty <mark>
+    // runs (regression: a chapter opening at offset 0 got two phantom marks
+    // around its first heading, 2026-11-11). They carry no text; skip them.
+    if (c.data.trim() === "" && s === 0 && e === 1) continue;
+    segs.push({ node: cur, s, e });
   }
   for (const sg of segs) if (off >= sg.s && off < sg.e) return { node: sg.node, offset: off - sg.s };
   // Off on a separator: prefer the node BEFORE it (a selection that ends
@@ -1503,7 +1501,12 @@ function placeRanges(root: HTMLElement, map: CanonicalMap, ranges: PlacedRange[]
     let cur: Node | null;
     while ((cur = walker.nextNode())) {
       const c = cur as unknown as { nodeType: 3; nodeName: string; data: string };
-      out.push({ node: cur as Text, s: map.toCanonical(c, 0), e: map.toCanonical(c, c.data.length) + 1 });
+      const s = map.toCanonical(c, 0);
+      const e = map.toCanonical(c, c.data.length) + 1;
+      // Same degenerate-node filter as pointAtCanonical: whitespace-only,
+      // fully-trimmed nodes would be marked as empty runs.
+      if (c.data.trim() === "" && s === 0 && e === 1) continue;
+      out.push({ node: cur as Text, s, e });
     }
     return out;
   })();

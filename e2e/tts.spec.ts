@@ -84,14 +84,6 @@ test("tts: no-key error, synthesize via worker, sentence highlight, cache hit", 
   // ever lands elsewhere.
   const section = page.getByTestId("section");
   await expect(section).toBeVisible();
-  // TEMP debug (slice 7 e2e): ground-truth the rendered section HTML.
-  console.log("TTS-DEBUG section HTML:", (await section.innerHTML()).slice(0, 400));
-  // TEMP debug (slice 7 e2e): ground-truth the chunk list the client receives.
-  const chunkResp = page
-    .waitForResponse((r) => r.url().includes("/tts-chunks") && r.request().method() === "GET", {
-      timeout: 30_000,
-    })
-    .catch(() => null);
   const inChapterOne = await (async () => {
     try {
       await expect
@@ -109,20 +101,6 @@ test("tts: no-key error, synthesize via worker, sentence highlight, cache hit", 
     await page.getByTestId("toc").getByRole("link", { name: "Chapter One" }).click();
   }
   await expect(section).toContainText("first chapter begins here");
-
-  // TEMP debug (slice 7 e2e): what chunks did the client receive?
-  {
-    const resp = await chunkResp;
-    if (resp) {
-      try {
-        console.log("TTS-DEBUG tts-chunks JSON:", JSON.stringify(await resp.json()));
-      } catch {
-        console.log("TTS-DEBUG tts-chunks unreadable");
-      }
-    } else {
-      console.log("TTS-DEBUG no tts-chunks response captured");
-    }
-  }
 
   // ---- 1. No key yet: toggling TTS surfaces the 409 with a Settings link.
   await page.getByTestId("tts-toggle-btn").click();
