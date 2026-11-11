@@ -220,18 +220,13 @@ export async function registerProgressSettings(app: FastifyInstance, ctx: Progre
     if (!mutatingCsrfOk(req, config)) return err(reply, 403, "csrf", "forbidden");
 
     const parsed = putOpenAiKeyBody.safeParse(req.body);
-    if (!parsed.success) {
-      // TEMP debug (slice 7 e2e): log received key length only — never the value.
-      const got =
-        typeof (req.body as { key?: unknown })?.key === "string" ? (req.body as { key: string }).key.length : -1;
-      console.log(`[tts-debug] openai-key PUT rejected: received key length=${got}`);
+    if (!parsed.success)
       return err(
         reply,
         400,
         "invalid_request",
         parsed.error.issues.map((i) => i.message).join(", "),
       );
-    }
     if (!looksLikeOpenAiKey(parsed.data.key))
       return err(reply, 400, "invalid_request", "key does not look like an OpenAI API key");
     const key = parsed.data.key;

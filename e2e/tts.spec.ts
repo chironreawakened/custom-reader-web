@@ -29,7 +29,8 @@ import { ensureOpenAiMock, OPENAI_MOCK_URL } from "./openai-server.js";
 // Fake key: a synthetic e2e fixture (no real credential). It must match
 // looksLikeOpenAiKey (^sk-(proj-)?[A-Za-z0-9_-]{16,}$) or the API rejects it
 // with 400 before it is ever stored; the mock ignores auth entirely.
-const FAKE_KEY = "***";
+// (The 20-char tail is a fixed non-credential pattern; not a real key.)
+const FAKE_KEY = "sk-e2eK3v9Qw0Rn7Tb2Xc8L";
 
 test.describe.configure({ mode: "serial" });
 
@@ -112,27 +113,9 @@ test("tts: no-key error, synthesize via worker, sentence highlight, cache hit", 
   // ---- 2. Save a key in the Settings modal (top-bar Settings button).
   await page.getByTestId("settings-btn").click();
   await expect(page.getByTestId("settings-modal")).toBeVisible();
-  // TEMP debug (slice 7 e2e): per-keystroke trace of the controlled input.
-  await page.getByTestId("settings-key").click();
-  for (const ch of FAKE_KEY) {
-    await page.getByTestId("settings-key").press(ch);
-    const v = await page.getByTestId("settings-key").inputValue();
-    if (v.length < 6 || ch === FAKE_KEY[FAKE_KEY.length - 1]) {
-      console.log("TTS-DEBUG keystroke, value now:", JSON.stringify(v));
-    }
-  }
-  console.log("TTS-DEBUG count of settings-key inputs:", await page.getByTestId("settings-key").count());
-  console.log(
-    "TTS-DEBUG activeElement:",
-    await page.evaluate(() => {
-      const el = document.activeElement as HTMLElement | null;
-      return el ? `${el.tagName} testid=${el.getAttribute("data-testid")}` : "none";
-    }),
-  );
+  await page.getByTestId("settings-key").fill(FAKE_KEY);
   await expect(page.getByTestId("settings-key")).toHaveValue(FAKE_KEY);
   await page.getByTestId("settings-savekey").click();
-  await expect(page.getByTestId("settings-keymsg")).toBeVisible({ timeout: 10_000 });
-  console.log("TTS-DEBUG keymsg:", await page.getByTestId("settings-keymsg").textContent());
   await expect(page.getByTestId("settings-keymsg")).toContainText("Key saved", { timeout: 10_000 });
   // The voice select lists the shared voice list (13 options).
   await expect(page.getByTestId("settings-voice").locator("option")).toHaveCount(13);
