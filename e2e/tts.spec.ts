@@ -112,9 +112,10 @@ test("tts: no-key error, synthesize via worker, sentence highlight, cache hit", 
   // ---- 2. Save a key in the Settings modal (top-bar Settings button).
   await page.getByTestId("settings-btn").click();
   await expect(page.getByTestId("settings-modal")).toBeVisible();
-  await page.getByTestId("settings-key").fill(FAKE_KEY);
+  await page.getByTestId("settings-key").pressSequentially(FAKE_KEY);
   // TEMP debug (slice 7 e2e): what did the input actually end up with?
   console.log("TTS-DEBUG input value length:", (await page.getByTestId("settings-key").inputValue()).length);
+  await expect(page.getByTestId("settings-key")).toHaveValue(FAKE_KEY);
   await page.getByTestId("settings-savekey").click();
   await expect(page.getByTestId("settings-keymsg")).toBeVisible({ timeout: 10_000 });
   console.log("TTS-DEBUG keymsg:", await page.getByTestId("settings-keymsg").textContent());
