@@ -222,7 +222,8 @@ export async function registerProgressSettings(app: FastifyInstance, ctx: Progre
     const parsed = putOpenAiKeyBody.safeParse(req.body);
     if (!parsed.success) {
       // TEMP debug (slice 7 e2e): log received key length only — never the value.
-      const got = typeof req.body?.key === "string" ? req.body.key.length : -1;
+      const got =
+        typeof (req.body as { key?: unknown })?.key === "string" ? (req.body as { key: string }).key.length : -1;
       console.log(`[tts-debug] openai-key PUT rejected: received key length=${got}`);
       return err(
         reply,
