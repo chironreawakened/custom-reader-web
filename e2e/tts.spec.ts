@@ -128,23 +128,28 @@ test("tts: no-key error, synthesize via worker, sentence highlight, cache hit", 
   await page.getByTestId("tts-toggle-btn").click();
   await expect(page.getByTestId("tts-panel")).toBeVisible();
   await expect(page.getByTestId("tts-error")).toHaveCount(0);
+  // The <audio> fetches its signed MP3 once the chunk is ready (2–3 s after
+  // the toggle), so the listener must be attached BEFORE any mark assertion:
+  // by the time the mark appears the audio response has already been served.
+  const chunk1Audio = expectAudioFetched(page);
   await expect(page.getByTestId("tts-progress")).toContainText("Chunk 1 / 3", { timeout: 30_000 });
   // Chunk 1 is the <h2>; the worker synthesizes via the mock and the first
   // sentence of the chunk gets the tts-mark highlight.
   await expect(page.locator('[data-testid="tts-mark"]')).toHaveCount(1, { timeout: 45_000 });
   await expect(page.locator('[data-testid="tts-mark"]')).toHaveText("Chapter One");
-  await expectAudioFetched(page);
+  await chunk1Audio;
   // Exactly one speech call so far.
   await expect.poll(() => mockSpeechRequests(page), { timeout: 15_000, intervals: [500] }).toBe(1);
 
   // ---- Step to chunk 2 (the first paragraph): one more mock call.
   await page.getByTestId("tts-next-btn").click();
+  const chunk2Audio = expectAudioFetched(page);
   await expect(page.getByTestId("tts-progress")).toContainText("Chunk 2 / 3");
   await expect(page.locator('[data-testid="tts-mark"]')).toHaveCount(1, { timeout: 45_000 });
   // The highlight wraps the chunk's FIRST sentence (SPECS §10 sentence
   // highlighting), not the whole paragraph.
   await expect(page.locator('[data-testid="tts-mark"]')).toHaveText("The first chapter begins here.");
-  await expectAudioFetched(page);
+  await chunk2Audio;
   await expect.poll(() => mockSpeechRequests(page), { timeout: 30_000, intervals: [500] }).toBe(2);
 
   // ---- 3. Stop and re-enable: chunk 1 replays from cache.
