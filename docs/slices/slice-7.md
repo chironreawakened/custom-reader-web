@@ -1,8 +1,7 @@
 # Slice 7 — TTS (text-to-speech reading)
 
-Status: **in progress** (local gates green 2026-11-11; e2e still red in CI —
-see Verification; the highlight bug was root-caused locally on 2026-11-11 and
-fixed, awaiting a green CI run)
+Status: **done** (local gates green + CI e2e green 2026-11-11, run 43118477572:
+5/5 passed)
 
 ## What shipped
 
@@ -68,3 +67,8 @@ highlighting of the currently spoken chunk.
 - The e2e mock's silence MP3 is 300 s on purpose: with 8 s audio the
   `onended` auto-advance moved the player past the heading chunk before
   assertions ran, which masked the highlight bug as a wrong-chunk symptom.
+- `expectAudioFetched`'s `page.on("response")` listener must be attached
+  BEFORE the mark/progress assertions, not after: the signed-URL MP3 lands a
+  couple of seconds after the toggle, long before a 45 s mark wait resolves,
+  so an after-the-fact listener can only time out on a response already
+  served (API log showed the 206; the spec saw nothing).
