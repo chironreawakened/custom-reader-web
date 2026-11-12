@@ -89,11 +89,13 @@ test("search: english + finnish stemming, empty, deep-link, highlights", async (
   await page.getByTestId("back-btn").click();
   await expect(page.getByTestId("library")).toBeVisible();
 
-  // ---- 5. highlights: a saved highlight surfaces in the highlights list -----
-  // Select "foxes jump over lazy dogs" in the English book's first chapter
+  // ---- 5. highlights: a saved highlight surfaces in the highlights list ----
+  // Select "foxes jump over lazy dogs" in the English book's Chapter One
   // (same TreeWalker technique as progress.spec) and save it as a highlight.
+  // A fresh open lands on the titlepage, so jump to Chapter One via the TOC.
   await enRow.click();
   await expect(page.getByTestId("reader")).toBeVisible();
+  await page.getByTestId("toc").getByRole("link", { name: "Chapter One" }).click();
   await expect(page.getByTestId("section")).toContainText("foxes jump over lazy dogs");
   await page.getByTestId("section").evaluate(() => {
     const article = document.querySelector("[data-testid='section']")!;
