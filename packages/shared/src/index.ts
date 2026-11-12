@@ -6,5 +6,6 @@ export * from "./canonical-text.js";
 export * from "./documents.js";
 export * from "./highlights.js";
 export * from "./progress.js";
+export * from "./search.js";
 export * from "./settings.js";
 export * from "./tts.js";

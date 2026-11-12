@@ -24,6 +24,7 @@ import type {
   TtsChunksResponse,
   PostTtsResponse,
   PutOpenAiKeyBody,
+  SearchResponse,
 } from "@reader/shared";
 
 /** Thin fetch client for the /v1 API. Same-origin; cookies carry the session. */
@@ -86,6 +87,13 @@ export const api = {
   listDocuments(tag?: string): Promise<ListDocumentsResponse> {
     const q = tag ? `?tag=${encodeURIComponent(tag)}` : "";
     return fetch(`/v1/documents${q}`, { headers }).then((r) => unwrap<ListDocumentsResponse>(r));
+  },
+  // ---- search (slice 8) ----------------------------------------------------
+  // Full-text search across the corpus (SPECS §9): one combined, OR'd
+  // websearch tsquery across the english/finnish/simple FTS configs; each list
+  // is ranked by ts_rank. Returns documents, sections, and highlights.
+  search(q: string): Promise<SearchResponse> {
+    return fetch(`/v1/search?q=${encodeURIComponent(q)}`, { headers }).then((r) => unwrap<SearchResponse>(r));
   },
   getDocument(id: string): Promise<GetDocumentResponse> {
     return fetch(`/v1/documents/${id}`, { headers }).then((r) => unwrap<GetDocumentResponse>(r));

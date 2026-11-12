@@ -18,9 +18,10 @@
  */
 import { DOMParser } from "@xmldom/xmldom";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import { getDb } from "../db/client.js";
 import { documents, highlights, sections } from "../db/schema.js";
+import { searchVectorSql } from "../db/search-vector.js";
 import type { AppConfig } from "../config.js";
 import type { ObjectStore } from "../storage/object-store.js";
 import {
@@ -273,7 +274,9 @@ export async function registerHighlights(app: FastifyInstance, ctx: HighlightsCo
         exact: body.exact,
         color: body.color,
         note: body.note,
-        searchVector: sql`to_tsvector('simple', ${body.exact})`,
+        // Slice 8: index the highlight with the document's language config
+        // (SPECS §9); null language falls back to `simple`.
+        searchVector: searchVectorSql(doc.language, body.exact),
         updatedAt: storedUpdatedAt,
       })
       .returning();

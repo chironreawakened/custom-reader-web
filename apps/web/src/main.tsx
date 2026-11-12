@@ -10,6 +10,7 @@ import {
 import { api } from "./api";
 import type { DocumentMeta } from "./api";
 import type { HighlightItem, TocEntryDto, TagItem, PatchDocumentBody } from "@reader/shared";
+import type { SearchResponse } from "@reader/shared";
 import type { PatchHighlightBody, PostHighlightBody } from "@reader/shared/highlights";
 // Value imports go through subpaths: the shared barrel re-exports node-only
 // crypto modules (rdr1, asset-url) that the browser bundle must not reach.
@@ -278,18 +279,109 @@ function AddUrlButton({ onAdded }: { onAdded: () => void }) {
   );
 }
 
-function Library({ onOpen }: { onOpen: (id: string) => void }) {
+/** Slice 8: the ranked search results panel (SPECS §9). Documents and
+ *  highlights open the parent document; sections deep-link to the exact
+ *  section within the document. Each list is capped server-side. */
+function SearchResults({
+  q,
+  data,
+  loading,
+  error,
+  onOpenSection,
+  onOpenDoc,
+}: {
+  q: string;
+  data: SearchResponse | undefined;
+  loading: boolean;
+  error: string | null;
+  onOpenSection: (docId: string, sectionId: string) => void;
+  onOpenDoc: (docId: string) => void;
+}) {
+  const docs = data?.documents ?? [];
+  const secs = data?.sections ?? [];
+  const hls = data?.highlights ?? [];
+  const total = docs.length + secs.length + hls.length;
+  const box: React.CSSProperties = { background: "#f7f9ff", border: "1px solid #dbe3ff", borderRadius: 10, padding: 12, marginBottom: 16 };
+  const heading: React.CSSProperties = { fontSize: 13, fontWeight: 600, opacity: 0.7, margin: "8px 0 6px", textTransform: "uppercase", letterSpacing: 0.4 };
+  const row: React.CSSProperties = { display: "block", width: "100%", textAlign: "left", background: "#fff", border: "1px solid #e0e0e0", borderRadius: 8, padding: "8px 10px", cursor: "pointer", margin: "0 0 6px", fontSize: 14 };
+  return (
+    <div data-testid="search-results" style={box}>
+      <div data-testid="search-results-count" style={{ fontSize: 14, marginBottom: 4 }}>
+        {loading ? `Searching “${q}”…` : error ? `Search failed.` : `${total} result${total === 1 ? "" : "s"} for “${q}”`}
+      </div>
+      {error ? <p style={{ color: "crimson", margin: 4, fontSize: 13 }}>{error}</p> : null}
+      {!loading && !error && total === 0 ? (
+        <p style={{ opacity: 0.7, margin: 4, fontSize: 14 }}>No matches in your library, articles, or highlights.</p>
+      ) : null}
+      {docs.length > 0 ? (
+        <>
+          <div style={heading}>Documents</div>
+          {docs.map((d) => (
+            <button key={`doc-${d.id}`} type="button" style={row} data-testid="search-doc-hit" onClick={() => onOpenDoc(d.id)}>
+              <strong>{d.title}</strong>
+              {d.author ? <span style={{ opacity: 0.7 }}> — {d.author}</span> : null}
+              <span style={{ opacity: 0.5, fontSize: 12 }}> · {d.type}</span>
+            </button>
+          ))}
+        </>
+      ) : null}
+      {secs.length > 0 ? (
+        <>
+          <div style={heading}>Sections</div>
+          {secs.map((s) => (
+            <button key={`sec-${s.id}`} type="button" style={row} data-testid="search-section-hit" onClick={() => onOpenSection(s.documentId, s.id)}>
+              <strong>{s.title ?? `Section ${s.idx}`}</strong>
+              <span style={{ opacity: 0.6, display: "block", fontSize: 13 }}>in {s.documentTitle}</span>
+            </button>
+          ))}
+        </>
+      ) : null}
+      {hls.length > 0 ? (
+        <>
+          <div style={heading}>Highlights</div>
+          {hls.map((h) => (
+            <button
+              key={`hl-${h.id}`}
+              type="button"
+              style={row}
+              data-testid="search-highlight-hit"
+              onClick={() => (h.sectionId ? onOpenSection(h.documentId, h.sectionId) : onOpenDoc(h.documentId))}
+            >
+              <strong>“{h.exact.slice(0, 80)}{h.exact.length > 80 ? "…" : ""}”</strong>
+              <span style={{ opacity: 0.6, display: "block", fontSize: 13 }}>in {h.documentTitle}</span>
+            </button>
+          ))}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function Library({ onOpen }: { onOpen: (docId: string, sectionId?: string) => void }) {
   const queryClient = useQueryClient();
   const [filterTag, setFilterTag] = React.useState<string | null>(null);
+  // Slice 8: full-text search (SPECS §9). Submits a query, lists the ranked
+  // hits, and deep-links a section result into its document + section.
+  const [searchInput, setSearchInput] = React.useState("");
+  const [searchQ, setSearchQ] = React.useState<string | null>(null);
   const docs = useQuery({
     queryKey: ["documents", filterTag ?? ""],
     queryFn: () => api.listDocuments(filterTag ?? undefined),
     refetchInterval: 10_000,
   });
   const allTags = useQuery({ queryKey: ["tags"], queryFn: api.listTags, staleTime: 30_000 });
+  const search = useQuery({
+    queryKey: ["search", searchQ],
+    queryFn: () => api.search(searchQ!),
+    enabled: !!searchQ,
+  });
   const invalidate = () => void queryClient.invalidateQueries({ queryKey: ["documents"] });
   const items = docs.data?.items ?? [];
   const tagNames = (allTags.data?.items ?? []).map((t) => t.name);
+  const submitSearch = () => {
+    const q = searchInput.trim();
+    if (q) setSearchQ(q);
+  };
   return (
     <div data-testid="library">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "12px 0" }}>
@@ -299,6 +391,38 @@ function Library({ onOpen }: { onOpen: (id: string) => void }) {
           <UploadButton onUploaded={() => invalidate()} />
         </span>
       </div>
+      {/* Slice 8 search box */}
+      <form
+        data-testid="search-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          submitSearch();
+        }}
+        style={{ display: "flex", gap: 8, marginBottom: 12 }}
+      >
+        <input
+          type="text"
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
+          placeholder="Search your books…"
+          aria-label="Search your books"
+          data-testid="search-input"
+          style={{ flex: 1, padding: "8px 12px", borderRadius: 8, border: "1px solid #ccc", fontSize: 14 }}
+        />
+        <button type="submit" disabled={searchInput.trim() === ""} data-testid="search-btn">
+          Search
+        </button>
+      </form>
+      {searchQ ? (
+        <SearchResults
+          q={searchQ}
+          data={search.data}
+          loading={search.isLoading}
+          error={search.isError ? String(search.error) : null}
+          onOpenSection={(docId, sectionId) => onOpen(docId, sectionId)}
+          onOpenDoc={(docId) => onOpen(docId)}
+        />
+      ) : null}
       {tagNames.length > 0 ? (
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }} data-testid="tag-filter">
           <button
@@ -469,7 +593,7 @@ function DocRow({
   );
 }
 
-function Reader({ docId, onBack }: { docId: string; onBack: () => void }) {
+function Reader({ docId, initialSectionId, onBack }: { docId: string; initialSectionId?: string | null; onBack: () => void }) {
   const qc = useQueryClient();
   const doc = useQuery({ queryKey: ["doc", docId], queryFn: () => api.getDocument(docId), refetchInterval: 8_000 });
   const toc = useQuery({
@@ -499,22 +623,25 @@ function Reader({ docId, onBack }: { docId: string; onBack: () => void }) {
     onSuccess: (res) => void qc.setQueryData(["settings"], res),
   });
 
-  const [sectionId, setSectionId] = React.useState<string | null>(null);
+  const [sectionId, setSectionId] = React.useState<string | null>(initialSectionId ?? null);
   const restoredRef = React.useRef(false);
   const [pendingScroll, setPendingScroll] = React.useState<number | null>(null);
 
   // Progress restore (slice 3): once the section list + saved spot are known,
   // open the saved section and scroll to the saved offset — once per book open.
+  // A search deep-link (initialSectionId) is an explicit navigation and wins
+  // over the saved spot, so restore is skipped when one was provided.
   React.useEffect(() => {
     if (restoredRef.current || !sections.data || !progress.data) return;
     restoredRef.current = true;
+    if (initialSectionId) return; // deep link from search — don't override
     const loc = progress.data.locator;
     if (!loc || loc.kind !== "reflow") return;
     const idx = sections.data.items.findIndex((s) => s.id === loc.sectionId);
     if (idx === -1) return; // saved spot points at a stale section
     setSectionId(loc.sectionId);
     if (loc.offset > 0) setPendingScroll(loc.offset);
-  }, [sections.data, progress.data]);
+  }, [sections.data, progress.data, initialSectionId]);
 
   // Default to the first section once the list is loaded and nothing was restored.
   React.useEffect(() => {
@@ -2272,14 +2399,14 @@ function PdfTocTree({ entries, onPick }: { entries: TocEntryDto[]; onPick: (page
   return <div>{render(null)}</div>;
 }
 
-function OpenDocView({ docId, onBack }: { docId: string; onBack: () => void }) {
+function OpenDocView({ docId, initialSectionId, onBack }: { docId: string; initialSectionId?: string | null; onBack: () => void }) {
   // Fetch the document (light) to know which reader to mount: PDFs go to
   // the faithful pdf.js reader, epub/article to the reflow reader.
   const doc = useQuery({ queryKey: ["doc", docId], queryFn: () => api.getDocument(docId) });
   if (doc.isError) return <ErrorBox message={String(doc.error)} onBack={onBack} />;
   if (!doc.data) return <p data-testid="reader-loading">Loading…</p>;
   if (doc.data.type === "pdf") return <PdfReader docId={docId} onBack={onBack} />;
-  return <Reader docId={docId} onBack={onBack} />;
+  return <Reader docId={docId} initialSectionId={initialSectionId ?? null} onBack={onBack} />;
 }
 
 /**
@@ -2413,7 +2540,7 @@ function SignedIn() {
       void qc.invalidateQueries();
     },
   });
-  const [openDoc, setOpenDoc] = React.useState<string | null>(null);
+  const [openDoc, setOpenDoc] = React.useState<{ id: string; sectionId?: string | null } | null>(null);
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   React.useEffect(() => {
     if (openDoc) window.scrollTo(0, 0);
@@ -2435,9 +2562,9 @@ function SignedIn() {
         {settingsOpen ? <SettingsModal onClose={() => setSettingsOpen(false)} /> : null}
         <HealthLine />
         {openDoc ? (
-          <OpenDocView docId={openDoc} onBack={() => setOpenDoc(null)} />
+          <OpenDocView docId={openDoc.id} initialSectionId={openDoc.sectionId ?? null} onBack={() => setOpenDoc(null)} />
         ) : (
-          <Library onOpen={setOpenDoc} />
+          <Library onOpen={(id) => setOpenDoc({ id })} />
         )}
       </div>
     );

@@ -12,10 +12,11 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import pgBoss from "pg-boss";
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import { Rdr1, type ObjectMeta } from "@reader/shared";
 import { loadConfig } from "./config.js";
 import { getDb, closeDb } from "./db/client.js";
+import { searchVectorSql } from "./db/search-vector.js";
 import { assets, backups, documents, sections, tocEntries, ttsCache, users, userSettings } from "./db/schema.js";
 import { createS3Storage } from "./storage/s3.js";
 import { createObjectStore } from "./storage/object-store.js";
@@ -145,7 +146,9 @@ async function processEpub(docId: string): Promise<void> {
       title: s.title,
       htmlObjectId: htmlObjId,
       canonicalLength: s.canonicalLength,
-      searchVector: sql`to_tsvector('simple', ${s.canonicalText})`,
+      // Slice 8: index with the document's own language config (SPECS §9);
+      // null language falls back to `simple`.
+      searchVector: searchVectorSql(epub.language, s.canonicalText),
     });
   }
 
@@ -299,7 +302,8 @@ async function processArticle(docId: string): Promise<void> {
       title: article.title,
       htmlObjectId: htmlObjId,
       canonicalLength: article.canonicalText.length,
-      searchVector: sql`to_tsvector('simple', ${article.canonicalText})`,
+      // Slice 8: index with the document's own language config (SPECS §9).
+      searchVector: searchVectorSql(article.language, article.canonicalText),
     });
 
     // 4. Finalize the document row.

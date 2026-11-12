@@ -12,13 +12,38 @@ const PNG_1PX = Buffer.from(
   "base64",
 );
 
+// Slice 8: language variants so the search e2e can verify per-document FTS
+// config indexing (SPECS §9). FIXTURE_LANG=fi produces a Finnish book whose
+// only matchable words are inflected Finnish (kissa/kissat → stem "kis"); the
+// default remains the English book used by the documents spec.
+const LANG = process.env.FIXTURE_LANG || "en";
+const BOOK =
+  LANG === "fi"
+    ? {
+        identifier: "urn:uuid:22222222-3333-4444-5555-666666666666",
+        title: "Yökirja",
+        ch1Title: "Luku Yksi",
+        ch2Title: "Luku Kaksi",
+        ch1Body: "<p>Kissa istuu matolla. Kissat nukkuvat ikkunalla koko yön ajan.</p>",
+        ch2: "Toinen ja viimeinen luku. Kirjan loppu koittaa hiljaa.",
+      }
+    : {
+        identifier: "urn:uuid:11111111-2222-3333-4444-555555555555",
+        title: "Night Fixture Book",
+        ch1Title: "Chapter One",
+        ch2Title: "Chapter Two",
+        ch1Body:
+          "<p>The first chapter begins here. It has some words for the word count.</p>\n  <p>Second paragraph: foxes jump over lazy dogs at night.</p>",
+        ch2: "The second and final chapter. The end of the fixture book.",
+      };
+
 const contentDocs = `<?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
-    <dc:identifier id="uid">urn:uuid:11111111-2222-3333-4444-555555555555</dc:identifier>
-    <dc:title>Night Fixture Book</dc:title>
+    <dc:identifier id="uid">${BOOK.identifier}</dc:identifier>
+    <dc:title>${BOOK.title}</dc:title>
     <dc:creator>Tessa Tester</dc:creator>
-    <dc:language>en</dc:language>
+    <dc:language>${LANG}</dc:language>
     <meta name="cover" content="cover-img"/>
   </metadata>
   <manifest>
@@ -49,8 +74,8 @@ const nav = `<?xml version="1.0" encoding="utf-8"?>
   <nav epub:type="toc" id="toc">
     <ol>
       <li><a href="title.xhtml">Titlepage</a></li>
-      <li><a href="ch1.xhtml">Chapter One</a></li>
-      <li><a href="ch2.xhtml">Chapter Two</a></li>
+      <li><a href="ch1.xhtml">${BOOK.ch1Title}</a></li>
+      <li><a href="ch2.xhtml">${BOOK.ch2Title}</a></li>
     </ol>
   </nav>
 </body>
@@ -60,7 +85,7 @@ const titlePage = `<?xml version="1.0" encoding="utf-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head><title>Titlepage</title></head>
 <body>
-  <h1>Night Fixture Book</h1>
+  <h1>${BOOK.title}</h1>
   <p>by Tessa Tester</p>
   <img src="cover.png" alt="cover"/>
 </body>
@@ -68,21 +93,20 @@ const titlePage = `<?xml version="1.0" encoding="utf-8"?>
 
 const ch1 = `<?xml version="1.0" encoding="utf-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml">
-<head><title>Chapter One</title></head>
+<head><title>${BOOK.ch1Title}</title></head>
 <body>
-  <h2>Chapter One</h2>
-  <p>The first chapter begins here. It has some words for the word count.</p>
-  <p>Second paragraph: foxes jump over lazy dogs at night.</p>
+  <h2>${BOOK.ch1Title}</h2>
+  ${BOOK.ch1Body}
   <img src="cover.png" alt="a picture"/>
 </body>
 </html>`;
 
 const ch2 = `<?xml version="1.0" encoding="utf-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml">
-<head><title>Chapter Two</title></head>
+<head><title>${BOOK.ch2Title}</title></head>
 <body>
-  <h2>Chapter Two</h2>
-  <p>The second and final chapter. The end of the fixture book.</p>
+  <h2>${BOOK.ch2Title}</h2>
+  <p>${BOOK.ch2}</p>
 </body>
 </html>`;
 
