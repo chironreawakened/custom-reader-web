@@ -2564,7 +2564,7 @@ function SignedIn() {
         {openDoc ? (
           <OpenDocView docId={openDoc.id} initialSectionId={openDoc.sectionId ?? null} onBack={() => setOpenDoc(null)} />
         ) : (
-          <Library onOpen={(id) => setOpenDoc({ id })} />
+          <Library onOpen={(id, sectionId) => setOpenDoc({ id, sectionId: sectionId ?? null })} />
         )}
       </div>
     );
