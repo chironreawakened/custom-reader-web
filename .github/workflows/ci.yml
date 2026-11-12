@@ -66,6 +66,7 @@ jobs:
             RDR_HOSTNAME=127.0.0.1:3100 \
             RDR_ENV=ci \
             AUTH_REQCODE_IP_LIMIT=10 \
+            AUTH_REQCODE_EMAIL_LIMIT=10 \
             MAILER=console \
             CONSOLE_MAILBOX=/tmp/e2e-mailbox.log \
             PORT=3100 \

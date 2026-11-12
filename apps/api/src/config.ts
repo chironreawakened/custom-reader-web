@@ -24,6 +24,11 @@ const schema = z.object({
   // Auth (slice 7 e2e): raise the request-code IP limit above the prod 5 so a
   // CI run with >4 spec logins keeps headroom. Undefined = prod default (5).
   AUTH_REQCODE_IP_LIMIT: z.coerce.number().int().positive().optional(),
+  // Same idea for the per-EMAIL request-code limiter (5/hour in prod): every
+  // e2e spec logs in as the single ALLOWED_EMAIL, so the suite's total login
+  // count must stay under it (slice 8 e2e: the 6th spec's login was the 6th
+  // request-code for that email and silently got a 202). Undefined = prod 5.
+  AUTH_REQCODE_EMAIL_LIMIT: z.coerce.number().int().positive().optional(),
 });
 
 export interface AppConfig {
@@ -50,6 +55,8 @@ export interface AppConfig {
   openAiBaseUrl?: string;
   /** request-code IP limiter limit; undefined = the prod default (5). */
   reqCodeIpLimit?: number;
+  /** request-code per-email limiter limit; undefined = the prod default (5/hour). */
+  reqCodeEmailLimit?: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -79,6 +86,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     mailer: e.MAILER,
     ...(e.OPENAI_API_BASE_URL && { openAiBaseUrl: e.OPENAI_API_BASE_URL }),
     ...(e.AUTH_REQCODE_IP_LIMIT && { reqCodeIpLimit: e.AUTH_REQCODE_IP_LIMIT }),
+    ...(e.AUTH_REQCODE_EMAIL_LIMIT && { reqCodeEmailLimit: e.AUTH_REQCODE_EMAIL_LIMIT }),
     ...(e.MAILER === "smtp" && {
       smtp: {
         host: e.SMTP_HOST!,

@@ -73,7 +73,8 @@ test("search: english + finnish stemming, empty, deep-link, highlights", async (
   // ---- 3. nonsense: zero results --------------------------------------------
   await page.getByTestId("search-input").fill("zzqxwvzz");
   await page.getByTestId("search-btn").click();
-  await expect(results.getByTestId("search-results-count")).toContainText("No matches", { timeout: 15_000 });
+  await expect(results.getByTestId("search-results-count")).toContainText("0 results for “zzqxwvzz”", { timeout: 15_000 });
+  await expect(results.getByTestId("search-doc-hit")).toHaveCount(0);
 
   // ---- 4. deep-link: a section hit opens the document at that section -------
   await page.getByTestId("search-input").fill("kissat");
