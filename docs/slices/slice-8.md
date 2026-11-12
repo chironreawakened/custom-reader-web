@@ -1,6 +1,6 @@
 # Slice 8 — Full-text search
 
-Status: **done** (local gates green + live-verified 2026-11-12; e2e runs in CI).
+Status: **done** (local gates green + live-verified + e2e CI-green, 2026-11-12).
 
 ## What shipped
 
@@ -79,6 +79,15 @@ lists (documents, sections, highlights), each ranked by `ts_rank` and capped.
   boolean || tsquery` → 500. Wrap the whole OR in `(...)` and cast once. This
   is the single most likely regression if the fragment is ever rewritten; it
   only 500s on a real Postgres (the unit-test fake never compiles the SQL).
+- **There are TWO request-code rate limiters** (`apps/api/src/routes/auth.ts`):
+  per-IP (`reqCodeIpLimit ?? 5` / 15 min) and per-email (`reqCodeEmailLimit ??
+  5` / hour). Every e2e spec logs in as the one `ALLOWED_EMAIL`, so the suite's
+  **total** login count must stay under *both*. A rate-limited request returns
+  a silent `202 {sent:true}` with **no** code in the console mailbox, so the
+  failure surfaces as "code never reached the console mailbox" in the next
+  spec's login. CI sets both `AUTH_REQCODE_IP_LIMIT=10` and
+  `AUTH_REQCODE_EMAIL_LIMIT=10`; if you add a logging-in spec, count total
+  logins first and raise the CI email limit if it nears 10.
 - The secondary document-title lookup uses drizzle `inArray(documents.id, ids)`,
   **not** raw `sql`…`= ANY(${ids})` — the latter binds the JS array as a
   single scalar parameter (`id = ANY($1)`) and 500s. `inArray` expands to a
@@ -99,3 +108,12 @@ lists (documents, sections, highlights), each ranked by `ts_rank` and capped.
   count of the shared "Night Fixture Book" fixture — specs share one user +
   one DB in the serial run, and earlier specs have already uploaded their own
   copy, so a "foxes" search can surface several English doc/section hits.
+- **The section deep-link is a 3-hop prop chain that silently degrades.**
+  `SignedIn` holds `openDoc = {id, sectionId}` and must pass
+  `onOpen={(id, sectionId) => setOpenDoc({ id, sectionId: sectionId ?? null })}`
+  to `<Library>`. If that callback only forwards `id`, the sectionId is
+  dropped and the reader opens at the default first section (the titlepage)
+  with **no error** — a live curl + a glance at "the book opened" looks
+  fine, but the e2e's `section` content assertion fails. The only reliable
+  check is asserting the rendered section *text* (e.g. "Kissa istuu matolla"),
+  not just that a document view appeared.
