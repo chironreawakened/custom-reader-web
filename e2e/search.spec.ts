@@ -130,9 +130,11 @@ test("search: english + finnish stemming, empty, deep-link, highlights", async (
 
   // Back to the library; "lazy" (only present in that highlight's sentence)
   // must surface a highlights hit with the exact saved text.
+  // .first(): progress.spec (runs earlier in the serial shared DB) already
+  // saved a highlight with this same phrase, so assert existence, not count.
   await page.getByTestId("back-btn").click();
   await expect(page.getByTestId("library")).toBeVisible();
   await page.getByTestId("search-input").fill("lazy");
   await page.getByTestId("search-btn").click();
-  await expect(results.getByTestId("search-highlight-hit").filter({ hasText: "foxes jump over lazy dogs" })).toBeVisible({ timeout: 15_000 });
+  await expect(results.getByTestId("search-highlight-hit").filter({ hasText: "foxes jump over lazy dogs" }).first()).toBeVisible({ timeout: 15_000 });
 });
